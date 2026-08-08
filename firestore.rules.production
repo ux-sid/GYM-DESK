@@ -1,0 +1,147 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isUserDoc(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function isStaffMember(gymId, uid) {
+      return exists(/databases/$(database)/documents/gyms/$(gymId)/staff/$(uid));
+    }
+
+    function getRole(gymId, uid) {
+      return get(/databases/$(database)/documents/gyms/$(gymId)/staff/$(uid)).data.role;
+    }
+
+    // Check permissions
+    function isOwner(gymId) {
+      return isAuthenticated() && (
+        isStaffMember(gymId, request.auth.uid) && getRole(gymId, request.auth.uid) == 'owner'
+      );
+    }
+
+    function isManager(gymId) {
+      return isAuthenticated() && (
+        isStaffMember(gymId, request.auth.uid) && 
+        (getRole(gymId, request.auth.uid) == 'owner' || getRole(gymId, request.auth.uid) == 'manager')
+      );
+    }
+
+    function isStaff(gymId) {
+      return isAuthenticated() && (
+        isStaffMember(gymId, request.auth.uid) && 
+        (getRole(gymId, request.auth.uid) == 'owner' || getRole(gymId, request.auth.uid) == 'manager' || getRole(gymId, request.auth.uid) == 'staff')
+      );
+    }
+
+    function isViewer(gymId) {
+      return isAuthenticated() && (
+        isStaffMember(gymId, request.auth.uid) && 
+        (getRole(gymId, request.auth.uid) in ['owner', 'manager', 'staff', 'viewer'])
+      );
+    }
+
+    // 1. Users collection
+    match /users/{uid} {
+      allow read, write: if isAuthenticated() && isUserDoc(uid);
+    }
+
+    // 2. Gyms collection
+    match /gyms/{gymId} {
+      allow read: if isAuthenticated() && isViewer(gymId);
+      allow create: if isAuthenticated() && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isAuthenticated() && isOwner(gymId);
+      
+      // Staff subcollection
+      match /staff/{staffUid} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create: if isAuthenticated() && (
+          (isOwner(gymId) && staffUid != request.auth.uid) ||
+          (staffUid == request.auth.uid && request.resource.data.role == 'owner' && 
+           !exists(/databases/$(database)/documents/gyms/$(gymId))) ||
+          (staffUid == request.auth.uid && 
+           'inviteId' in request.resource.data &&
+           get(/databases/$(database)/documents/gyms/$(gymId)/invites/$(request.resource.data.inviteId)).data.status == 'pending' &&
+           get(/databases/$(database)/documents/gyms/$(gymId)/invites/$(request.resource.data.inviteId)).data.email.lower() == request.auth.token.email.lower() &&
+           request.resource.data.role == get(/databases/$(database)/documents/gyms/$(gymId)/invites/$(request.resource.data.inviteId)).data.role)
+        );
+        allow update, delete: if isAuthenticated() && isOwner(gymId) && staffUid != request.auth.uid;
+      }
+      
+      // Invites subcollection
+      match /invites/{inviteId} {
+        allow read: if isAuthenticated() && (
+          isManager(gymId) || 
+          (request.auth.token.email != null && request.auth.token.email.lower() == resource.data.email.lower())
+        );
+        allow create, delete: if isAuthenticated() && isManager(gymId);
+        allow update: if isAuthenticated() && (
+          isManager(gymId) || 
+          (request.auth.token.email != null && request.auth.token.email.lower() == resource.data.email.lower() && 
+           request.resource.data.status == 'accepted')
+        );
+      }
+      
+      // Plans subcollection
+      match /plans/{planId} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create, update: if isAuthenticated() && isManager(gymId);
+        allow delete: if isAuthenticated() && isOwner(gymId);
+      }
+      
+      // Members subcollection
+      match /members/{memberId} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create, update: if isAuthenticated() && isStaff(gymId);
+        allow delete: if isAuthenticated() && isOwner(gymId);
+      }
+      
+      // Memberships subcollection
+      match /memberships/{membershipId} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create, update: if isAuthenticated() && isStaff(gymId);
+        allow delete: if isAuthenticated() && isOwner(gymId);
+      }
+      
+      // Dues subcollection
+      match /dues/{dueId} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create: if isAuthenticated() && isStaff(gymId);
+        allow update: if isAuthenticated() && (
+          isManager(gymId) || 
+          (isStaff(gymId) && 
+           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['amountPaid', 'balance', 'baseStatus', 'updatedAt']))
+        );
+        allow delete: if isAuthenticated() && isOwner(gymId);
+      }
+      
+      // Payments subcollection
+      match /payments/{paymentId} {
+        allow read: if isAuthenticated() && isViewer(gymId);
+        allow create: if isAuthenticated() && (
+          (request.resource.data.type == 'payment' && isStaff(gymId)) ||
+          (request.resource.data.type in ['refund', 'void', 'adjustment'] && isOwner(gymId))
+        );
+        allow update, delete: if false;
+      }
+      
+      // Audit Logs subcollection
+      match /auditLogs/{auditId} {
+        allow read: if isAuthenticated() && isManager(gymId);
+        allow create: if isAuthenticated() && isStaff(gymId);
+        allow update, delete: if false;
+      }
+
+      // Counters subcollection
+      match /counters/{counterId} {
+        allow read, write: if isAuthenticated() && isStaff(gymId);
+      }
+    }
+  }
+}

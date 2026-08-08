@@ -1,0 +1,9 @@
+{
+  "name": "gym-desk",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

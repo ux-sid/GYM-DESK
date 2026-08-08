@@ -1,0 +1,6 @@
+{
+  "projects": {
+    "default": "gymdesk-prod",
+    "development": "gymdesk-local"
+  }
+}
