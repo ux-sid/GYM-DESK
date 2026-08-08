@@ -286,7 +286,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
     try {
       const paymentPayload: any = {
         memberId,
-        branchId: member.branchId,
+        branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         type: 'payment',
         amount: payAmount,
         paymentDate: todayStr,
@@ -337,7 +337,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
       
       const newMembershipPayload = {
         memberId,
-        branchId: member.branchId,
+        branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         planId: renewPlanId,
         planNameSnapshot: plan.name,
         planPriceSnapshot: plan.standardPrice,
@@ -361,7 +361,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
       const duesRaw = generateDuesForMembership({
         memberId,
         membershipId: '', 
-        branchId: member.branchId,
+        branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         startDate: rStartDate,
         endDate: rEndDate,
         finalAmount: netPremium,
