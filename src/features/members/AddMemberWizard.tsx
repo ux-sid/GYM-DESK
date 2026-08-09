@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db, addMemberCompleteAtomic, uploadMemberPhoto } from '../../services/firebase';
 import type { Plan } from '../../types';
 import { getKolkataTodayString, calculateMembershipEndDate } from '../../utils/dateUtils';
@@ -304,13 +304,32 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     }, 15000);
 
     try {
-      // 1. Build Member object (photo will be updated asynchronously in background if provided)
+      // 1. Process photo if provided (fast Storage upload with 3s timeout or instant Base64 fallback)
+      let photoPath: string | undefined = undefined;
+      if (photoBlob) {
+        try {
+          const uploadPromise = uploadMemberPhoto(gym.id, 'temp', photoBlob);
+          const uploadTimeout = new Promise<string>((_, reject) =>
+            setTimeout(() => reject(new Error('Timeout')), 3000)
+          );
+          photoPath = await Promise.race([uploadPromise, uploadTimeout]);
+        } catch (photoErr) {
+          console.warn('Photo storage upload slow/failed, using inline data URL:', photoErr);
+          photoPath = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.readAsDataURL(photoBlob);
+          });
+        }
+      }
+
+      // 2. Build Member object
       const normPhone = normalizePhone(phone);
       const memberPayload = {
         branchId: gym.defaultBranchId || 'main-branch',
         fullName,
         searchName: fullName.trim().toLowerCase(),
-        photoStoragePath: undefined,
+        photoStoragePath: photoPath || undefined,
         phone,
         phoneNormalised: normPhone,
         alternatePhone: alternatePhone || undefined,
@@ -376,7 +395,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         durationMonths,
       });
 
-      // 2. Run atomic transaction immediately (Ultra Fast - completes in < 500ms)
+      // 3. Run atomic transaction (includes photoStoragePath in payload)
       const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
@@ -403,18 +422,6 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
       
       const savedMemberId = await Promise.race([savePromise, txnTimeout]);
       clearTimeout(masterTimeout);
-
-      // 3. Upload photo asynchronously in background without blocking the UI
-      if (photoBlob) {
-        uploadMemberPhoto(gym.id, savedMemberId, photoBlob)
-          .then(async (photoUrl) => {
-            if (photoUrl) {
-              const memberDocRef = doc(db, 'gyms', gym.id, 'members', savedMemberId);
-              await updateDoc(memberDocRef, { photoStoragePath: photoUrl });
-            }
-          })
-          .catch(err => console.error('Background photo upload error:', err));
-      }
 
       onSuccess(savedMemberId);
     } catch (err: any) {

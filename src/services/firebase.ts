@@ -862,22 +862,29 @@ import { uploadBytes, getDownloadURL } from 'firebase/storage';
 
 export async function uploadMemberPhoto(gymId: string, memberId: string | 'temp', file: Blob): Promise<string> {
   const isOffline = localStorage.getItem('gymdesk_offline_mode') === 'true';
+  const getBase64 = (): Promise<string> => new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result as string);
+    reader.readAsDataURL(file);
+  });
+
   if (isOffline) {
-    // In offline testing mode, fallback to base64 to avoid storage emulator requirements
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.readAsDataURL(file);
-    });
+    return getBase64();
   }
   
-  const ext = file.type.split('/')[1] || 'jpeg';
-  // If memberId is temp (during creation), use a random UUID
-  const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
-  const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
-  const storageRef = ref(storage, path);
-  
-  await uploadBytes(storageRef, file);
-  const downloadUrl = await getDownloadURL(storageRef);
-  return downloadUrl;
+  try {
+    const mimeType = file.type && file.type.startsWith('image/') ? file.type : 'image/jpeg';
+    const ext = mimeType.split('/')[1] || 'jpeg';
+    const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
+    const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
+    const storageRef = ref(storage, path);
+    
+    // Explicitly pass contentType so Firebase Storage security rules (contentType.matches('image/.*')) do not block upload with 403
+    await uploadBytes(storageRef, file, { contentType: mimeType });
+    const downloadUrl = await getDownloadURL(storageRef);
+    return downloadUrl;
+  } catch (err) {
+    console.warn('Firebase Storage upload failed or blocked. Falling back to Base64 image URL:', err);
+    return getBase64();
+  }
 }
