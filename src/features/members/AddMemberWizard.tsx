@@ -298,13 +298,29 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     setSaving(true);
     setSaveError(null);
 
+    // Master timeout - entire save operation must complete within 30 seconds
+    const masterTimeout = setTimeout(() => {
+      setSaveError('Save operation timed out. Please check your internet connection and try again.');
+      setSaving(false);
+    }, 30000);
+
     try {
       let photoPath = '';
 
-      // 1. Upload photo to Firebase Storage
+      // 1. Upload photo to Firebase Storage (with its own timeout)
       if (photoBlob) {
-        photoPath = await uploadMemberPhoto(gym.id, 'temp', photoBlob);
-        setUploadProgress(100);
+        try {
+          const uploadPromise = uploadMemberPhoto(gym.id, 'temp', photoBlob);
+          const uploadTimeout = new Promise<string>((_, reject) =>
+            setTimeout(() => reject(new Error('Photo upload timed out')), 15000)
+          );
+          photoPath = await Promise.race([uploadPromise, uploadTimeout]);
+          setUploadProgress(100);
+        } catch (photoErr: any) {
+          console.error('Photo upload failed:', photoErr);
+          // Continue without photo rather than blocking the entire save
+          photoPath = '';
+        }
       }
 
       // 2. Build Member object
@@ -379,6 +395,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         durationMonths,
       });
 
+      // 3. Run atomic transaction with timeout
       const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
@@ -399,15 +416,18 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         user.displayName || 'Owner'
       );
       
-      const timeoutPromise = new Promise<string>((_, reject) => 
-        setTimeout(() => reject(new Error('Save request timed out. Please check your connection and try again.')), 15000)
+      const txnTimeout = new Promise<string>((_, reject) => 
+        setTimeout(() => reject(new Error('Database save timed out. Please check your connection and try again.')), 15000)
       );
       
-      const savedMemberId = await Promise.race([savePromise, timeoutPromise]);
+      const savedMemberId = await Promise.race([savePromise, txnTimeout]);
       
+      clearTimeout(masterTimeout);
       onSuccess(savedMemberId);
     } catch (err: any) {
-      setSaveError(err.message || 'An error occurred while saving the member.');
+      console.error('handleSave error:', err);
+      clearTimeout(masterTimeout);
+      setSaveError(err?.message || String(err) || 'An unknown error occurred while saving the member.');
     } finally {
       setSaving(false);
     }
