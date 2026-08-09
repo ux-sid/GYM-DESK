@@ -879,12 +879,18 @@ export async function uploadMemberPhoto(gymId: string, memberId: string | 'temp'
     const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
     const storageRef = ref(storage, path);
     
-    // Explicitly pass contentType so Firebase Storage security rules (contentType.matches('image/.*')) do not block upload with 403
-    await uploadBytes(storageRef, file, { contentType: mimeType });
-    const downloadUrl = await getDownloadURL(storageRef);
-    return downloadUrl;
+    const storagePromise = (async () => {
+      await uploadBytes(storageRef, file, { contentType: mimeType });
+      return await getDownloadURL(storageRef);
+    })();
+
+    const timeoutPromise = new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error('Storage upload timeout')), 4000)
+    );
+
+    return await Promise.race([storagePromise, timeoutPromise]);
   } catch (err) {
-    console.warn('Firebase Storage upload failed or blocked. Falling back to Base64 image URL:', err);
+    console.warn('Firebase Storage upload failed or timed out. Falling back to Base64 image URL:', err);
     return getBase64();
   }
 }

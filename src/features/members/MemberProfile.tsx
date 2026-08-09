@@ -16,6 +16,9 @@ function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
+  if (obj instanceof Date) {
+    return obj;
+  }
   if (Array.isArray(obj)) {
     return obj.map(cleanUndefined);
   }
@@ -234,16 +237,25 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gym || !user) return;
+    if (!gym || !user || !member) return;
     setEditSaving(true);
     setEditError(null);
 
+    const masterTimeout = setTimeout(() => {
+      setEditError('Update timed out. Please check your connection and try again.');
+      setEditSaving(false);
+    }, 15000);
+
     try {
-      let newPhotoPath = member!.photoStoragePath;
+      let newPhotoPath = member.photoStoragePath;
       if (editPhotoFile) {
-        const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
-        if (photoPath) {
-          newPhotoPath = photoPath;
+        try {
+          const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
+          if (photoPath) {
+            newPhotoPath = photoPath;
+          }
+        } catch (photoErr) {
+          console.warn('Photo upload failed during profile edit:', photoErr);
         }
       }
 
@@ -271,9 +283,13 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         user.uid,
         user.displayName || 'Owner'
       );
+
+      clearTimeout(masterTimeout);
+      setEditPhotoFile(null);
       setShowEditModal(false);
     } catch (err: any) {
-      console.error(err);
+      console.error('handleSaveEdit error:', err);
+      clearTimeout(masterTimeout);
       setEditError(err.message || 'Failed to update member.');
     } finally {
       setEditSaving(false);
