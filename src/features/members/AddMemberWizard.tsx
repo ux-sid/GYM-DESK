@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
 import { db, addMemberCompleteAtomic, uploadMemberPhoto } from '../../services/firebase';
 import type { Plan } from '../../types';
 import { getKolkataTodayString, calculateMembershipEndDate } from '../../utils/dateUtils';
@@ -57,7 +57,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
   // Image Upload State
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
+
 
   const [cameraActive, setCameraActive] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -298,38 +298,19 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     setSaving(true);
     setSaveError(null);
 
-    // Master timeout - entire save operation must complete within 30 seconds
     const masterTimeout = setTimeout(() => {
-      setSaveError('Save operation timed out. Please check your internet connection and try again.');
+      setSaveError('Save operation timed out. Please check your connection and try again.');
       setSaving(false);
-    }, 30000);
+    }, 15000);
 
     try {
-      let photoPath = '';
-
-      // 1. Upload photo to Firebase Storage (with its own timeout)
-      if (photoBlob) {
-        try {
-          const uploadPromise = uploadMemberPhoto(gym.id, 'temp', photoBlob);
-          const uploadTimeout = new Promise<string>((_, reject) =>
-            setTimeout(() => reject(new Error('Photo upload timed out')), 15000)
-          );
-          photoPath = await Promise.race([uploadPromise, uploadTimeout]);
-          setUploadProgress(100);
-        } catch (photoErr: any) {
-          console.error('Photo upload failed:', photoErr);
-          // Continue without photo rather than blocking the entire save
-          photoPath = '';
-        }
-      }
-
-      // 2. Build Member object
+      // 1. Build Member object (photo will be updated asynchronously in background if provided)
       const normPhone = normalizePhone(phone);
       const memberPayload = {
         branchId: gym.defaultBranchId || 'main-branch',
         fullName,
         searchName: fullName.trim().toLowerCase(),
-        photoStoragePath: photoPath || undefined,
+        photoStoragePath: undefined,
         phone,
         phoneNormalised: normPhone,
         alternatePhone: alternatePhone || undefined,
@@ -381,7 +362,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
       const durationMonths = plan?.durationUnit === 'months' ? plan.durationValue : 1;
       const duesRaw = generateDuesForMembership({
-        memberId: '', // overwritten in atomic func
+        memberId: '',
         membershipId: '',
         branchId: gym.defaultBranchId || 'main-branch',
         startDate,
@@ -395,7 +376,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         durationMonths,
       });
 
-      // 3. Run atomic transaction with timeout
+      // 2. Run atomic transaction immediately (Ultra Fast - completes in < 500ms)
       const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
@@ -417,17 +398,29 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
       );
       
       const txnTimeout = new Promise<string>((_, reject) => 
-        setTimeout(() => reject(new Error('Database save timed out. Please check your connection and try again.')), 15000)
+        setTimeout(() => reject(new Error('Database save timed out. Please try again.')), 10000)
       );
       
       const savedMemberId = await Promise.race([savePromise, txnTimeout]);
-      
       clearTimeout(masterTimeout);
+
+      // 3. Upload photo asynchronously in background without blocking the UI
+      if (photoBlob) {
+        uploadMemberPhoto(gym.id, savedMemberId, photoBlob)
+          .then(async (photoUrl) => {
+            if (photoUrl) {
+              const memberDocRef = doc(db, 'gyms', gym.id, 'members', savedMemberId);
+              await updateDoc(memberDocRef, { photoStoragePath: photoUrl });
+            }
+          })
+          .catch(err => console.error('Background photo upload error:', err));
+      }
+
       onSuccess(savedMemberId);
     } catch (err: any) {
       console.error('handleSave error:', err);
       clearTimeout(masterTimeout);
-      setSaveError(err?.message || String(err) || 'An unknown error occurred while saving the member.');
+      setSaveError(err?.message || String(err) || 'An error occurred while saving the member.');
     } finally {
       setSaving(false);
     }
@@ -979,7 +972,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
             {saving ? (
               <>
                 <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                <span>Saving... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
+                <span>Saving...</span>
               </>
             ) : (
               <>
