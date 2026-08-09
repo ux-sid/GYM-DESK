@@ -390,17 +390,36 @@ export async function addMemberCompleteAtomic(
   const auditRef = doc(collection(db, 'gyms', gymId, 'auditLogs'));
 
   const result = await runLocalOrOnlineTransaction(db, async (transaction) => {
-    // 1. Generate Member Code
+    // 1. ALL READS FIRST (Firestore rule: all reads must happen before any writes)
     const counterSnap = await transaction.get(counterRef);
+    let rCounterSnap: any = null;
+    if (paymentData && paymentRef) {
+      rCounterSnap = await transaction.get(receiptCounterRef);
+    }
+
+    // 2. CALCULATE VALUES
     let nextNum = 1;
     if (counterSnap.exists()) {
       nextNum = (counterSnap.data().current || 0) + 1;
     }
-    transaction.set(counterRef, { current: nextNum }, { merge: true });
 
     const currentYear = new Date().getFullYear();
     const formattedCode = `GYM-${currentYear}-${String(nextNum).padStart(4, '0')}`;
 
+    let receiptNumber = '';
+    let rNextNum = 1;
+    if (paymentData && paymentRef) {
+      if (rCounterSnap && rCounterSnap.exists()) {
+        rNextNum = (rCounterSnap.data().current || 0) + 1;
+      }
+      receiptNumber = `RCPT-${currentYear}-${String(rNextNum).padStart(6, '0')}`;
+    }
+
+    // 3. ALL WRITES AFTER
+    // a. Update member counter
+    transaction.set(counterRef, { current: nextNum }, { merge: true });
+
+    // b. Set Member
     const newMember: Member = {
       ...memberData,
       id: memberId,
@@ -411,7 +430,7 @@ export async function addMemberCompleteAtomic(
     };
     transaction.set(memberRef, newMember);
 
-    // 2. Generate Membership
+    // c. Set Membership
     const finalMembership: Membership = {
       ...membershipData,
       id: membershipId,
@@ -421,7 +440,7 @@ export async function addMemberCompleteAtomic(
     };
     transaction.set(membershipRef, finalMembership);
 
-    // 3. Generate Dues
+    // d. Set Dues
     const duesList: Due[] = [];
     for (let i = 0; i < duesRaw.length; i++) {
       const dueId = `${membershipId}_due_${i}`;
@@ -439,15 +458,9 @@ export async function addMemberCompleteAtomic(
       duesList.push(finalDue);
     }
 
-    // 4. Record Payment if provided
+    // e. Set Payment if provided
     if (paymentData && paymentRef) {
-      const rCounterSnap = await transaction.get(receiptCounterRef);
-      let rNextNum = 1;
-      if (rCounterSnap.exists()) {
-        rNextNum = (rCounterSnap.data().current || 0) + 1;
-      }
       transaction.set(receiptCounterRef, { current: rNextNum }, { merge: true });
-      const receiptNumber = `RCPT-${currentYear}-${String(rNextNum).padStart(6, '0')}`;
 
       const { allocations, updatedDues } = allocatePayment(paymentData.amount, duesList);
 
