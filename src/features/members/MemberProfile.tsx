@@ -333,18 +333,18 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
 
       const rEndDate = calculateMembershipEndDate(rStartDate, plan.durationValue, plan.durationUnit);
 
-      const netPremium = plan.standardPrice + plan.joiningFee;
+      const netPremium = (plan.standardPrice || 0) + (plan.joiningFee || 0);
       
       const newMembershipPayload = {
         memberId,
         branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         planId: renewPlanId,
         planNameSnapshot: plan.name,
-        planPriceSnapshot: plan.standardPrice,
+        planPriceSnapshot: plan.standardPrice || 0,
         startDate: rStartDate,
         endDate: rEndDate,
-        grossAmount: plan.standardPrice,
-        joiningFee: plan.joiningFee,
+        grossAmount: plan.standardPrice || 0,
+        joiningFee: plan.joiningFee || 0,
         discountType: 'none' as const,
         discountValue: 0,
         discountAmount: 0,

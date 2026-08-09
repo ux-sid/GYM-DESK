@@ -2,16 +2,17 @@ import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { Login } from './features/auth/Login';
 import { FirstRunSetup } from './features/auth/FirstRunSetup';
-import { Dashboard } from './features/dashboard/Dashboard';
-import { MembersList } from './features/members/MembersList';
-import { MemberProfile } from './features/members/MemberProfile';
-import { AddMemberWizard } from './features/members/AddMemberWizard';
-import { PlansList } from './features/plans/PlansList';
-import { PaymentsDues } from './features/payments/PaymentsDues';
-import { Reports } from './features/reports/Reports';
-import { StaffList } from './features/staff/StaffList';
-import { Settings } from './features/settings/Settings';
-import { SuperAdminDashboard } from './features/superadmin/SuperAdminDashboard';
+// Lazy loaded components for code splitting
+const Dashboard = React.lazy(() => import('./features/dashboard/Dashboard').then(m => ({ default: m.Dashboard })));
+const MembersList = React.lazy(() => import('./features/members/MembersList').then(m => ({ default: m.MembersList })));
+const MemberProfile = React.lazy(() => import('./features/members/MemberProfile').then(m => ({ default: m.MemberProfile })));
+const AddMemberWizard = React.lazy(() => import('./features/members/AddMemberWizard').then(m => ({ default: m.AddMemberWizard })));
+const PlansList = React.lazy(() => import('./features/plans/PlansList').then(m => ({ default: m.PlansList })));
+const PaymentsDues = React.lazy(() => import('./features/payments/PaymentsDues').then(m => ({ default: m.PaymentsDues })));
+const Reports = React.lazy(() => import('./features/reports/Reports').then(m => ({ default: m.Reports })));
+const StaffList = React.lazy(() => import('./features/staff/StaffList').then(m => ({ default: m.StaffList })));
+const Settings = React.lazy(() => import('./features/settings/Settings').then(m => ({ default: m.Settings })));
+const SuperAdminDashboard = React.lazy(() => import('./features/superadmin/SuperAdminDashboard').then(m => ({ default: m.SuperAdminDashboard })));
 import { OfflineBanner } from './components/OfflineBanner';
 import { SUPER_ADMIN_EMAILS } from './utils/constants';
 import { 
@@ -24,6 +25,7 @@ const GymDeskApp: React.FC = () => {
   
   // Navigation State
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(new Set(['dashboard']));
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
 
   // Theme State
@@ -69,6 +71,7 @@ const GymDeskApp: React.FC = () => {
 
   const handleNavigate = (tab: string) => {
     setActiveTab(tab);
+    setVisitedTabs(prev => new Set(prev).add(tab));
     setSelectedMemberId(null);
     setIsAddingMember(false);
     setMobileMenuOpen(false);
@@ -294,39 +297,86 @@ const GymDeskApp: React.FC = () => {
         {/* MAIN BODY AREA */}
         <main className="flex-1 p-4 md:p-8 overflow-y-auto max-w-full pb-24 md:pb-8">
           
-          {/* Active component router resolver */}
-          {isAddingMember ? (
-            <AddMemberWizard 
-              onSuccess={handleAddMemberSuccess}
-              onCancel={() => setIsAddingMember(false)}
-            />
-          ) : selectedMemberId ? (
-            <MemberProfile 
-              memberId={selectedMemberId}
-              onBack={() => setSelectedMemberId(null)}
-            />
-          ) : (
-            <>
-              {activeTab === 'dashboard' && (
-                <Dashboard 
-                  onNavigate={handleNavigate}
-                  onAddMember={() => setIsAddingMember(true)}
+          {/* Active component router resolver with Suspense and State Retention */}
+          <React.Suspense fallback={
+            <div className="flex-1 flex justify-center items-center h-full min-h-[50vh]">
+              <div className="h-10 w-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+            </div>
+          }>
+            <div className={isAddingMember ? 'block' : 'hidden'}>
+              {isAddingMember && (
+                <AddMemberWizard 
+                  onSuccess={handleAddMemberSuccess}
+                  onCancel={() => setIsAddingMember(false)}
                 />
               )}
-              {activeTab === 'members' && (
-                <MembersList 
-                  onSelectMember={handleSelectMember}
-                  onAddMember={() => setIsAddingMember(true)}
+            </div>
+
+            <div className={(!isAddingMember && selectedMemberId) ? 'block' : 'hidden'}>
+              {selectedMemberId && (
+                <MemberProfile 
+                  memberId={selectedMemberId}
+                  onBack={() => setSelectedMemberId(null)}
                 />
               )}
-              {activeTab === 'ledger' && <PaymentsDues />}
-              {activeTab === 'plans' && <PlansList />}
-              {activeTab === 'reports' && <Reports />}
-              {activeTab === 'staff' && <StaffList />}
-              {activeTab === 'settings' && <Settings />}
-              {activeTab === 'superadmin' && user?.email && SUPER_ADMIN_EMAILS.some(e => e.toLowerCase() === user.email?.toLowerCase()) && <SuperAdminDashboard onNavigate={handleNavigate} />}
-            </>
-          )}
+            </div>
+
+            <div className={(!isAddingMember && !selectedMemberId) ? 'block' : 'hidden'}>
+              {visitedTabs.has('dashboard') && (
+                <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
+                  <Dashboard 
+                    onNavigate={handleNavigate}
+                    onAddMember={() => setIsAddingMember(true)}
+                  />
+                </div>
+              )}
+              
+              {visitedTabs.has('members') && (
+                <div className={activeTab === 'members' ? 'block' : 'hidden'}>
+                  <MembersList 
+                    onSelectMember={handleSelectMember}
+                    onAddMember={() => setIsAddingMember(true)}
+                  />
+                </div>
+              )}
+              
+              {visitedTabs.has('ledger') && (
+                <div className={activeTab === 'ledger' ? 'block' : 'hidden'}>
+                  <PaymentsDues />
+                </div>
+              )}
+              
+              {visitedTabs.has('plans') && (
+                <div className={activeTab === 'plans' ? 'block' : 'hidden'}>
+                  <PlansList />
+                </div>
+              )}
+              
+              {visitedTabs.has('reports') && (
+                <div className={activeTab === 'reports' ? 'block' : 'hidden'}>
+                  <Reports />
+                </div>
+              )}
+              
+              {visitedTabs.has('staff') && (
+                <div className={activeTab === 'staff' ? 'block' : 'hidden'}>
+                  <StaffList />
+                </div>
+              )}
+              
+              {visitedTabs.has('settings') && (
+                <div className={activeTab === 'settings' ? 'block' : 'hidden'}>
+                  <Settings />
+                </div>
+              )}
+              
+              {visitedTabs.has('superadmin') && user?.email && SUPER_ADMIN_EMAILS.some(e => e.toLowerCase() === user.email?.toLowerCase()) && (
+                <div className={activeTab === 'superadmin' ? 'block' : 'hidden'}>
+                  <SuperAdminDashboard onNavigate={handleNavigate} />
+                </div>
+              )}
+            </div>
+          </React.Suspense>
         </main>
 
         {/* MOBILE BOTTOM NAVIGATION BAR */}

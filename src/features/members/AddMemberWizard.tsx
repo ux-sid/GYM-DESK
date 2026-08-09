@@ -12,6 +12,9 @@ function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
+  if (obj instanceof Date) {
+    return obj;
+  }
   if (Array.isArray(obj)) {
     return obj.map(cleanUndefined);
   }
@@ -120,8 +123,8 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     const plan = plans.find(p => p.id === selectedPlanId);
     if (!plan) return;
 
-    setCustomPrice(plan.standardPrice);
-    setJoiningFee(plan.joiningFee);
+    setCustomPrice(plan.standardPrice || 0);
+    setJoiningFee(plan.joiningFee || 0);
     
     // Auto end date
     const calcEnd = calculateMembershipEndDate(startDate, plan.durationValue, plan.durationUnit);
@@ -164,14 +167,18 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
   // Calculations for Step 2
   const plan = plans.find(p => p.id === selectedPlanId);
+  const safeCustomPrice = isNaN(customPrice) ? 0 : customPrice;
+  const safeJoiningFee = isNaN(joiningFee) ? 0 : joiningFee;
+  const safeDiscountValue = isNaN(discountValue) ? 0 : discountValue;
   const discountAmount = 
-    discountType === 'fixed' ? discountValue :
-    discountType === 'percentage' ? (customPrice * discountValue) / 100 : 0;
+    discountType === 'fixed' ? safeDiscountValue :
+    discountType === 'percentage' ? (safeCustomPrice * safeDiscountValue) / 100 : 0;
+  const safeDiscountAmount = isNaN(discountAmount) ? 0 : discountAmount;
   
-  const taxRate = gym?.taxEnabled ? (gym.optionalTaxRate || 18) : 0;
-  const taxableAmount = Math.max(0, customPrice + joiningFee - discountAmount);
+  const taxRate = gym?.taxEnabled ? (Number(gym.optionalTaxRate) || 18) : 0;
+  const taxableAmount = Math.max(0, safeCustomPrice + safeJoiningFee - safeDiscountAmount);
   const taxAmount = (taxableAmount * taxRate) / 100;
-  const finalAmount = parseFloat((taxableAmount + taxAmount).toFixed(2));
+  const finalAmount = Math.round((taxableAmount + taxAmount) * 100) / 100 || 0;
 
   // --- Step 1 UI Methods (Camera) ---
 
@@ -339,13 +346,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         branchId: gym.defaultBranchId || 'main-branch',
         planId: selectedPlanId,
         planNameSnapshot: plan?.name || 'Custom Plan',
-        planPriceSnapshot: customPrice,
+        planPriceSnapshot: safeCustomPrice,
         startDate,
         endDate,
-        grossAmount: customPrice,
-        joiningFee,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountType,
-        discountValue,
+        discountValue: safeDiscountValue,
         discountAmount,
         taxAmount,
         finalAmount,
@@ -364,15 +371,15 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         startDate,
         endDate,
         finalAmount,
-        grossAmount: customPrice,
-        joiningFee,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountAmount,
         taxAmount,
         billingFrequency: plan?.billingFrequency || 'upfront',
         durationMonths,
       });
 
-      const savedMemberId = await addMemberCompleteAtomic(
+      const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
         cleanUndefined(membershipPayload),
@@ -381,9 +388,9 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
           branchId: gym.defaultBranchId || 'main-branch',
           type: 'payment',
           amount: paymentAmount,
-          paymentDate: startDate,
           paymentMethod,
           transactionReference: transactionRef ? transactionRef : null,
+          paymentDate: startDate,
           note: null,
           status: 'completed',
           createdBy: user.uid
@@ -391,7 +398,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         user.uid, 
         user.displayName || 'Owner'
       );
-
+      
+      const timeoutPromise = new Promise<string>((_, reject) => 
+        setTimeout(() => reject(new Error('Save request timed out. Please check your connection and try again.')), 15000)
+      );
+      
+      const savedMemberId = await Promise.race([savePromise, timeoutPromise]);
+      
       onSuccess(savedMemberId);
     } catch (err: any) {
       setSaveError(err.message || 'An error occurred while saving the member.');
@@ -663,7 +676,8 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <input
                     type="number"
                     value={customPrice}
-                    onChange={e => setCustomPrice(parseFloat(e.target.value) || 0)}
+                    onChange={e => { const v = parseFloat(e.target.value); setCustomPrice(isNaN(v) ? 0 : v); }}
+                    placeholder="0"
                     className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   />
                 </div>
@@ -673,7 +687,8 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <input
                     type="number"
                     value={joiningFee}
-                    onChange={e => setJoiningFee(parseFloat(e.target.value) || 0)}
+                    onChange={e => { const v = parseFloat(e.target.value); setJoiningFee(isNaN(v) ? 0 : v); }}
+                    placeholder="0"
                     className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   />
                 </div>
@@ -700,7 +715,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                     <input
                       type="number"
                       value={discountValue}
-                      onChange={e => setDiscountValue(parseFloat(e.target.value) || 0)}
+                      onChange={e => { const v = parseFloat(e.target.value); setDiscountValue(isNaN(v) ? 0 : v); }}
                       className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                       placeholder="e.g. 500"
                     />
@@ -714,7 +729,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <span>Gross Plan Price:</span>
                   <span>₹{customPrice}</span>
                 </div>
-                {joiningFee > 0 && (
+                {safeJoiningFee > 0 && (
                   <div className="flex justify-between text-muted-gray">
                     <span>Joining Fee:</span>
                     <span>+ ₹{joiningFee}</span>
@@ -770,12 +785,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                 <input
                   type="number"
                   value={paymentAmount}
-                  onChange={e => setPaymentAmount(parseFloat(e.target.value) || 0)}
+                  onChange={e => { const v = parseFloat(e.target.value); setPaymentAmount(isNaN(v) ? 0 : v); }}
+                  placeholder="0"
                   className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   max={finalAmount}
                 />
                 <span className="text-[10px] text-muted-gray">
-                  Remaining unpaid balance: <span className="text-text-main font-bold">₹{parseFloat((finalAmount - paymentAmount).toFixed(2))}</span>
+                  Remaining unpaid balance: <span className="text-text-main font-bold">₹{Math.round((finalAmount - paymentAmount) * 100) / 100}</span>
                 </span>
               </div>
 
