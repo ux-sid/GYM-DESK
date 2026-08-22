@@ -88,6 +88,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
   const [payNote, setPayNote] = useState('');
 
   const [renewPlanId, setRenewPlanId] = useState('');
+  const [renewCustomPrice, setRenewCustomPrice] = useState(0);
+  const [renewJoiningFee, setRenewJoiningFee] = useState(0);
   const [renewStartDateOption, setRenewStartDateOption] = useState<'immediate' | 'after_end'>('immediate');
 
   const [freezeStart, setFreezeStart] = useState(getKolkataTodayString());
@@ -349,18 +351,20 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
 
       const rEndDate = calculateMembershipEndDate(rStartDate, plan.durationValue, plan.durationUnit);
 
-      const netPremium = (plan.standardPrice || 0) + (plan.joiningFee || 0);
+      const safeCustomPrice = isNaN(renewCustomPrice) ? 0 : renewCustomPrice;
+      const safeJoiningFee = isNaN(renewJoiningFee) ? 0 : renewJoiningFee;
+      const netPremium = Math.round((safeCustomPrice + safeJoiningFee) * 100) / 100;
       
       const newMembershipPayload = {
         memberId,
         branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         planId: renewPlanId,
         planNameSnapshot: plan.name,
-        planPriceSnapshot: plan.standardPrice || 0,
+        planPriceSnapshot: safeCustomPrice,
         startDate: rStartDate,
         endDate: rEndDate,
-        grossAmount: plan.standardPrice || 0,
-        joiningFee: plan.joiningFee || 0,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountType: 'none' as const,
         discountValue: 0,
         discountAmount: 0,
@@ -381,8 +385,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         startDate: rStartDate,
         endDate: rEndDate,
         finalAmount: netPremium,
-        grossAmount: plan.standardPrice,
-        joiningFee: plan.joiningFee,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountAmount: 0,
         taxAmount: 0,
         billingFrequency: plan.billingFrequency,
@@ -393,6 +397,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
       
       setShowRenewModal(false);
       setRenewPlanId('');
+      setRenewCustomPrice(0);
+      setRenewJoiningFee(0);
     } catch (err: any) {
       alert(err.message || 'Renewal failed.');
     } finally {
@@ -761,7 +767,10 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
               <button
                 onClick={() => {
                   if (plans.length > 0) {
-                    setRenewPlanId(plans[0].id);
+                    const firstPlan = plans[0];
+                    setRenewPlanId(firstPlan.id);
+                    setRenewCustomPrice(firstPlan.standardPrice || 0);
+                    setRenewJoiningFee(firstPlan.joiningFee || 0);
                   }
                   setShowRenewModal(true);
                 }}
@@ -1085,20 +1094,51 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
             
             <div className="space-y-4 text-xs">
               <div>
-                <label className="block text-muted-gray mb-1">Select Plan</label>
+                <label className="block text-muted-gray mb-1 font-medium">Select Plan</label>
                 <select
                   value={renewPlanId}
-                  onChange={e => setRenewPlanId(e.target.value)}
+                  onChange={e => {
+                    const selectedId = e.target.value;
+                    setRenewPlanId(selectedId);
+                    const p = plans.find(plan => plan.id === selectedId);
+                    if (p) {
+                      setRenewCustomPrice(p.standardPrice || 0);
+                      setRenewJoiningFee(p.joiningFee || 0);
+                    }
+                  }}
                   className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none"
                 >
                   {plans.map(p => (
-                    <option key={p.id} value={p.id}>{p.name} (₹{p.standardPrice})</option>
+                    <option key={p.id} value={p.id}>{p.name} (Standard: ₹{p.standardPrice})</option>
                   ))}
                 </select>
               </div>
 
               <div>
-                <label className="block text-muted-gray mb-1">Start Date Option</label>
+                <label className="block text-muted-gray mb-1 font-medium">Renewal Amount / Fee (₹)</label>
+                <input
+                  type="number"
+                  value={renewCustomPrice}
+                  onChange={e => { const v = parseFloat(e.target.value); setRenewCustomPrice(isNaN(v) ? 0 : v); }}
+                  placeholder="0"
+                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
+                />
+                <span className="text-[10px] text-muted-gray mt-0.5 block">You can manually edit/override the renewal price above.</span>
+              </div>
+
+              <div>
+                <label className="block text-muted-gray mb-1 font-medium">Joining Fee (₹)</label>
+                <input
+                  type="number"
+                  value={renewJoiningFee}
+                  onChange={e => { const v = parseFloat(e.target.value); setRenewJoiningFee(isNaN(v) ? 0 : v); }}
+                  placeholder="0"
+                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-muted-gray mb-1 font-medium">Start Date Option</label>
                 <select
                   value={renewStartDateOption}
                   onChange={e => setRenewStartDateOption(e.target.value as any)}
@@ -1109,6 +1149,11 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                     <option value="after_end">Start Day After Current Expiration ({latestMs.endDate})</option>
                   )}
                 </select>
+              </div>
+
+              <div className="bg-canvas border border-border-muted p-3 rounded-xl flex justify-between items-center text-xs font-semibold text-text-main">
+                <span>Total Renewal Fee:</span>
+                <span className="text-primary font-bold text-sm">₹{Math.round(((isNaN(renewCustomPrice) ? 0 : renewCustomPrice) + (isNaN(renewJoiningFee) ? 0 : renewJoiningFee)) * 100) / 100}</span>
               </div>
             </div>
 
