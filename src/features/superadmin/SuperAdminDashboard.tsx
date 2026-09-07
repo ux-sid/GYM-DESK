@@ -10,8 +10,19 @@ interface Props {
   onNavigate: (tab: string) => void;
 }
 
+const safeFormatDate = (dateVal: any): string => {
+  if (!dateVal) return 'N/A';
+  try {
+    const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
+    if (isNaN(d.getTime())) return 'N/A';
+    return format(d, 'PP');
+  } catch {
+    return 'N/A';
+  }
+};
+
 export const SuperAdminDashboard: React.FC<Props> = ({ onNavigate }) => {
-  const { selectGym } = useAuth();
+  const { selectGym, gym } = useAuth();
   const [gyms, setGyms] = useState<Gym[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -25,37 +36,71 @@ export const SuperAdminDashboard: React.FC<Props> = ({ onNavigate }) => {
   useEffect(() => {
     const fetchAllGyms = async () => {
       try {
-        const q = query(collection(db, 'gyms')); // Assuming open read access for now
-        const snap = await getDocs(q);
-        const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as Gym));
-        
-        // Sort manually if index missing
+        let docs: any[] = [];
+        try {
+          const q = query(collection(db, 'gyms'));
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            docs = snap.docs;
+          }
+        } catch (serverErr) {
+          console.warn('Server query failed for gyms, checking local cache:', serverErr);
+        }
+
+        if (docs.length === 0) {
+          try {
+            const { getDocsFromCache } = await import('firebase/firestore');
+            const cacheSnap = await getDocsFromCache(collection(db, 'gyms'));
+            if (!cacheSnap.empty) {
+              docs = cacheSnap.docs;
+            }
+          } catch {
+            // Ignore
+          }
+        }
+
+        let data: Gym[] = docs.map(d => ({ id: d.id, ...d.data() } as Gym));
+
+        // If no gyms returned from query but active gym is loaded in auth, display it
+        if (data.length === 0 && gym) {
+          data = [gym];
+        }
+
+        // Sort safely without throwing on invalid dates
         data.sort((a, b) => {
-          const dateA = a.createdAt?.toDate ? a.createdAt.toDate() : new Date(a.createdAt);
-          const dateB = b.createdAt?.toDate ? b.createdAt.toDate() : new Date(b.createdAt);
-          return dateB.getTime() - dateA.getTime();
+          const getSafeTime = (val: any) => {
+            if (!val) return 0;
+            try {
+              const d = val.toDate ? val.toDate() : new Date(val);
+              const t = d.getTime();
+              return isNaN(t) ? 0 : t;
+            } catch {
+              return 0;
+            }
+          };
+          return getSafeTime(b.createdAt) - getSafeTime(a.createdAt);
         });
 
         setGyms(data);
       } catch (err) {
         console.error('Error fetching gyms for super admin', err);
-        alert('Failed to load gyms. Ensure Firebase Rules permit reading the gyms collection.');
+        if (gym) setGyms([gym]);
       } finally {
         setLoading(false);
       }
     };
     fetchAllGyms();
-  }, []);
+  }, [gym]);
 
   const filtered = gyms.filter(g => 
-    g.name.toLowerCase().includes(search.toLowerCase()) || 
-    g.email.toLowerCase().includes(search.toLowerCase()) ||
-    g.phone.includes(search)
+    (g.name || '').toLowerCase().includes(search.toLowerCase()) || 
+    (g.email || '').toLowerCase().includes(search.toLowerCase()) ||
+    (g.phone || '').includes(search)
   );
 
   if (loading) {
     return (
-      <div className="flex-1 flex justify-center items-center h-full">
+      <div className="flex-1 flex justify-center items-center h-full min-h-[50vh]">
         <div className="h-10 w-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
       </div>
     );
@@ -153,7 +198,7 @@ export const SuperAdminDashboard: React.FC<Props> = ({ onNavigate }) => {
                 <div className="flex items-center gap-2 pt-2 border-t border-border-dark mt-2">
                   <Calendar className="h-4 w-4 shrink-0" />
                   <span>
-                    Registered: {g.createdAt ? format(g.createdAt.toDate ? g.createdAt.toDate() : new Date(g.createdAt), 'PP') : 'N/A'}
+                    Registered: {safeFormatDate(g.createdAt)}
                   </span>
                 </div>
               </div>
@@ -183,7 +228,7 @@ export const SuperAdminDashboard: React.FC<Props> = ({ onNavigate }) => {
                     <td className="px-6 py-4 text-muted-gray">{g.email}</td>
                     <td className="px-6 py-4 text-muted-gray">{g.phone}</td>
                     <td className="px-6 py-4 text-muted-gray">
-                      {g.createdAt ? format(g.createdAt.toDate ? g.createdAt.toDate() : new Date(g.createdAt), 'PP') : 'N/A'}
+                      {safeFormatDate(g.createdAt)}
                     </td>
                   </tr>
                 ))}

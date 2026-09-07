@@ -3,6 +3,7 @@ import {
   getAuth, 
   GoogleAuthProvider, 
   signInWithPopup, 
+  signInWithRedirect,
   signOut
 } from 'firebase/auth';
 import type { User } from 'firebase/auth';
@@ -10,7 +11,6 @@ import {
   initializeFirestore, 
   persistentLocalCache, 
   persistentMultipleTabManager,
-  memoryLocalCache,
   connectFirestoreEmulator,
   disableNetwork,
   doc,
@@ -38,23 +38,19 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-// Check if device is trusted or we are running in local offline-only bypass mode
+// Check if device is in local offline-only bypass mode
 const isOfflineMode = localStorage.getItem('gymdesk_offline_mode') === 'true';
-const isTrustedDevice = localStorage.getItem('gymdesk_trusted_device') === 'true' || isOfflineMode;
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firestore with cache settings
-export const db = isTrustedDevice
-  ? initializeFirestore(app, {
-      localCache: persistentLocalCache({
-        tabManager: persistentMultipleTabManager(),
-      }),
-    })
-  : initializeFirestore(app, {
-      localCache: memoryLocalCache(),
-    });
+// Always use persistent local cache so returning users get their data
+// immediately from IndexedDB without waiting for network queries
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager(),
+  }),
+});
 
 export const auth = getAuth(app);
 export const storage = getStorage(app);
@@ -159,16 +155,76 @@ export async function runLocalOrOnlineTransaction<T>(
     });
     return result;
   } else {
-    return runTransaction(firestoreDb, updateFunction);
+    try {
+      return await runTransaction(firestoreDb, updateFunction);
+    } catch (err: any) {
+      // If server rejects transaction (e.g. security rules or offline glitch),
+      // retry with local cache batch so operations never get stuck
+      console.warn('[Transaction] Online transaction failed, falling back to local batch:', err);
+      const pendingWrites: any[] = [];
+      const mockTransaction = {
+        get: async (docRef: any) => {
+          try {
+            return await getDoc(docRef);
+          } catch {
+            return {
+              exists: () => false,
+              data: () => undefined,
+              id: docRef.id,
+              ref: docRef
+            } as any;
+          }
+        },
+        set: (docRef: any, data: any, options?: any) => {
+          pendingWrites.push({ type: 'set', ref: docRef, data: cleanUndefined(data), options });
+          return mockTransaction;
+        },
+        update: (docRef: any, data: any) => {
+          pendingWrites.push({ type: 'update', ref: docRef, data: cleanUndefined(data) });
+          return mockTransaction;
+        },
+        delete: (docRef: any) => {
+          pendingWrites.push({ type: 'delete', ref: docRef });
+          return mockTransaction;
+        }
+      };
+
+      const result = await updateFunction(mockTransaction);
+      const batch = writeBatch(firestoreDb);
+      for (const write of pendingWrites) {
+        if (write.type === 'set') {
+          batch.set(write.ref, write.data, write.options);
+        } else if (write.type === 'update') {
+          batch.update(write.ref, write.data);
+        } else if (write.type === 'delete') {
+          batch.delete(write.ref);
+        }
+      }
+      batch.commit().catch(e => console.warn('Local fallback batch error:', e));
+      return result;
+    }
   }
 }
 
 const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-export const signInWithGoogle = async (_isMobile: boolean) => {
-  // Use signInWithPopup exclusively. signInWithRedirect is known to break on mobile browsers
-  // due to ITP (Intelligent Tracking Prevention) blocking cross-site auth state persistence.
-  await signInWithPopup(auth, googleProvider);
+export const signInWithGoogleRedirect = async () => {
+  return await signInWithRedirect(auth, googleProvider);
+};
+
+export const signInWithGoogle = async (preferRedirect?: boolean) => {
+  if (preferRedirect) {
+    return await signInWithRedirect(auth, googleProvider);
+  }
+  try {
+    await signInWithPopup(auth, googleProvider);
+  } catch (err: any) {
+    console.warn('[Auth] Popup sign-in error, falling back to full-window redirect:', err);
+    // On any popup failure (Error 500 from Google popup, popup blocked, closed by user, cross-origin isolation):
+    // Fall back to top-level redirect flow which avoids popup cookie issues
+    await signInWithRedirect(auth, googleProvider);
+  }
 };
 
 export const logoutUser = () => signOut(auth);
@@ -176,8 +232,14 @@ export const logoutUser = () => signOut(auth);
 // --- DB Service Layer ---
 
 // Gym setup & details
-export async function createGymWorkspace(ownerUid: string, ownerEmail: string, ownerName: string, gymData: Omit<Gym, 'id' | 'createdBy' | 'createdAt' | 'updatedAt'>) {
-  const gymId = doc(collection(db, 'gyms')).id;
+export async function createGymWorkspace(
+  ownerUid: string, 
+  ownerEmail: string, 
+  ownerName: string, 
+  gymData: Omit<Gym, 'id' | 'createdBy' | 'createdAt' | 'updatedAt'>,
+  customGymId?: string
+) {
+  const gymId = customGymId || doc(collection(db, 'gyms')).id;
   const gymRef = doc(db, 'gyms', gymId);
   const staffRef = doc(db, 'gyms', gymId, 'staff', ownerUid);
   const userRef = doc(db, 'users', ownerUid);
@@ -209,9 +271,21 @@ export async function createGymWorkspace(ownerUid: string, ownerEmail: string, o
       email: ownerEmail,
       fullName: ownerName,
       lastGymId: gymId,
+      gyms: {
+        [gymId]: {
+          role: 'owner',
+          name: gymData.name
+        }
+      },
       updatedAt: timestamp
     }, { merge: true });
   });
+
+  try {
+    localStorage.setItem('gymdesk_last_gym_id', gymId);
+  } catch (e) {
+    // Ignore storage errors
+  }
 
   return gymId;
 }

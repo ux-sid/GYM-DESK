@@ -90,7 +90,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
   const [renewPlanId, setRenewPlanId] = useState('');
   const [renewCustomPrice, setRenewCustomPrice] = useState(0);
   const [renewJoiningFee, setRenewJoiningFee] = useState(0);
-  const [renewStartDateOption, setRenewStartDateOption] = useState<'immediate' | 'after_end'>('immediate');
+  const [renewStartDateOption, setRenewStartDateOption] = useState<'immediate' | 'after_end' | 'custom'>('immediate');
+  const [renewCustomStartDate, setRenewCustomStartDate] = useState(getKolkataTodayString());
 
   const [freezeStart, setFreezeStart] = useState(getKolkataTodayString());
   const [freezeEnd, setFreezeEnd] = useState(getKolkataTodayString());
@@ -347,6 +348,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         const currentEnd = new Date(latestMs.endDate);
         currentEnd.setDate(currentEnd.getDate() + 1);
         rStartDate = currentEnd.toISOString().split('T')[0];
+      } else if (renewStartDateOption === 'custom') {
+        rStartDate = renewCustomStartDate;
       }
 
       const rEndDate = calculateMembershipEndDate(rStartDate, plan.durationValue, plan.durationUnit);
@@ -1148,7 +1151,19 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                   {latestMs && (
                     <option value="after_end">Start Day After Current Expiration ({latestMs.endDate})</option>
                   )}
+                  <option value="custom">Custom Date</option>
                 </select>
+                {renewStartDateOption === 'custom' && (
+                  <div className="mt-2">
+                    <label className="block text-muted-gray mb-1 font-medium text-[10px]">Select Date</label>
+                    <input
+                      type="date"
+                      value={renewCustomStartDate}
+                      onChange={e => setRenewCustomStartDate(e.target.value)}
+                      className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="bg-canvas border border-border-muted p-3 rounded-xl flex justify-between items-center text-xs font-semibold text-text-main">

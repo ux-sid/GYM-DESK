@@ -11,8 +11,9 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
   // 1. Create Demo Plans
   const plans = [
     { id: 'plan_1', name: 'General Monthly', price: 1000, durationInMonths: 1, durationInDays: 30, type: 'general' },
-    { id: 'plan_2', name: 'Quarterly Special', price: 2500, durationInMonths: 3, durationInDays: 90, type: 'general' },
-    { id: 'plan_3', name: 'Annual Elite', price: 8000, durationInMonths: 12, durationInDays: 365, type: 'general' },
+    { id: 'plan_2', name: '3 month (Standard: 3000)', price: 3000, durationInMonths: 3, durationInDays: 90, type: 'general' },
+    { id: 'plan_3', name: 'Quarterly Special', price: 2500, durationInMonths: 3, durationInDays: 90, type: 'general' },
+    { id: 'plan_4', name: 'Annual Elite', price: 8000, durationInMonths: 12, durationInDays: 365, type: 'general' },
   ];
 
   plans.forEach(plan => {
