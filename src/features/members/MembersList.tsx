@@ -54,7 +54,14 @@ export const MembersList: React.FC<MembersListProps> = ({ onSelectMember, onAddM
     if (!gym) return;
 
     const unsubMembers = onSnapshot(collection(db, 'gyms', gym.id, 'members'), (snap) => {
-      setMembers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Member)));
+      const allMembers = snap.docs.map(d => ({ id: d.id, ...d.data() } as Member));
+      setMembers(allMembers);
+
+      if (snap.empty) {
+        import('../../utils/mockData').then(({ seedDemoData }) => {
+          seedDemoData(gym.id, 'owner', 'Gym Owner').catch(() => {});
+        });
+      }
     });
 
     const unsubMemberships = onSnapshot(collection(db, 'gyms', gym.id, 'memberships'), (snap) => {

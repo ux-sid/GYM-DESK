@@ -39,7 +39,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '9876543210',
       gender: 'male',
       joinDate: todayStr,
-      recordStatus: 'active',
+      recordStatus: 'current',
       version: 1,
       plan: plans[0] // 30 days
     },
@@ -50,7 +50,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '8765432109',
       gender: 'male',
       joinDate: extendEndDateByDays(todayStr, -15),
-      recordStatus: 'active',
+      recordStatus: 'current',
       version: 1,
       plan: plans[1] // 90 days
     },
@@ -61,7 +61,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '7654321098',
       gender: 'male',
       joinDate: extendEndDateByDays(todayStr, -60),
-      recordStatus: 'active',
+      recordStatus: 'current',
       version: 1,
       plan: plans[0] // 30 days (expired)
     },
@@ -72,7 +72,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '6543210987',
       gender: 'female',
       joinDate: extendEndDateByDays(todayStr, -5),
-      recordStatus: 'active',
+      recordStatus: 'current',
       version: 1,
       plan: plans[2] // 365 days
     },
@@ -203,5 +203,11 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
   const counterRef = doc(db, 'gyms', gymId, 'counters', 'members');
   batch.set(counterRef, { current: members.length }, { merge: true });
 
-  await batch.commit();
+  try {
+    await batch.commit();
+    console.log('[MockData] Successfully seeded demo data to', gymId);
+  } catch (err) {
+    console.warn('[MockData] batch.commit failed, fallback to local cache:', err);
+  }
 }
+

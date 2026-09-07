@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useAuth } from './AuthContext';
-import { createGymWorkspace, db } from '../../services/firebase';
-import { collection, getDocs, doc, getDoc, getDocsFromCache } from 'firebase/firestore';
+import { useAuth, SHARED_GYM_ID } from './AuthContext';
+import { createGymWorkspace } from '../../services/firebase';
 import { gymSetupSchema } from '../../validation/schemas';
 import { Dumbbell, PlusCircle, ShieldAlert, Building, ArrowRight, LogOut } from 'lucide-react';
 
@@ -12,9 +11,21 @@ export const FirstRunSetup: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(true);
-  const [existingGyms, setExistingGyms] = useState<any[]>([]);
+  const [existingGyms] = useState<any[]>([]);
   const [manualGymId, setManualGymId] = useState('');
   const [scanError, setScanError] = useState<string | null>(null);
+
+  const handleConnectExisting = async (gymId: string) => {
+    if (!gymId.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      await selectGym(gymId.trim());
+    } catch (err: any) {
+      setError(err.message || 'Failed to connect to gym workspace.');
+      setLoading(false);
+    }
+  };
 
   // Auto-scan for existing gym workspaces on mount
   useEffect(() => {
@@ -23,105 +34,13 @@ export const FirstRunSetup: React.FC = () => {
       setScanning(true);
       setScanError(null);
       try {
-        // 0. Check deterministic workspace for current user email
-        if (user?.email) {
-          const detId = 'gym_' + user.email.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-          console.log('[FirstRunSetup] Auto-connecting to deterministic gym:', detId);
-          await selectGym(detId);
-          return;
-        }
-
-        // 1. Check localStorage keys for any saved gym ID
-        for (let i = 0; i < localStorage.length; i++) {
-          const k = localStorage.key(i);
-          if (k && (k.includes('gym') || k.includes('last_gym'))) {
-            const val = localStorage.getItem(k);
-            if (val && typeof val === 'string' && val.length > 5 && !val.startsWith('{')) {
-              try {
-                const gSnap = await getDoc(doc(db, 'gyms', val));
-                if (gSnap.exists() && isMounted) {
-                  console.log('[FirstRunSetup] Auto-loaded gym from localStorage key:', k, val);
-                  await selectGym(val);
-                  return;
-                }
-              } catch (e) {
-                // Ignore
-              }
-            }
-          }
-        }
-
-        // 2. Check if mock-tester-uid has a gym
-        try {
-          const testerSnap = await getDoc(doc(db, 'users', 'mock-tester-uid'));
-          if (testerSnap.exists()) {
-            const tData = testerSnap.data();
-            const gId = tData.lastGymId || (tData.gyms ? Object.keys(tData.gyms)[0] : null);
-            if (gId) {
-              const gymSnap = await getDoc(doc(db, 'gyms', gId));
-              if (gymSnap.exists() && isMounted) {
-                console.log('[FirstRunSetup] Found gym from tester profile:', gId);
-                await selectGym(gId);
-                return;
-              }
-            }
-          }
-        } catch (e) {
-          // Ignore
-        }
-
-        // 3. Try reading all gyms from local cache first (IndexedDB)
-        try {
-          const cacheSnap = await getDocsFromCache(collection(db, 'gyms'));
-          if (!cacheSnap.empty && isMounted) {
-            const list = cacheSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-            setExistingGyms(list);
-
-            const autoGym: any = list.find((g: any) =>
-              g.createdBy === user?.uid ||
-              (user?.email && g.email?.toLowerCase() === user?.email?.toLowerCase())
-            ) || (list.length === 1 ? list[0] : null);
-
-            if (autoGym) {
-              console.log('[FirstRunSetup] Auto-connected to gym from cache:', autoGym.id);
-              await selectGym(autoGym.id);
-              return;
-            }
-          }
-        } catch (e) {
-          // Ignore
-        }
-
-        // 4. Check all gyms in Firestore from server
-        try {
-          const gymsSnap = await getDocs(collection(db, 'gyms'));
-          if (!isMounted) return;
-
-          if (!gymsSnap.empty) {
-            const list = gymsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-            setExistingGyms(list);
-
-            // Find match by email or UID
-            const match = list.find((g: any) =>
-              g.createdBy === user?.uid ||
-              (user?.email && g.email?.toLowerCase() === user?.email?.toLowerCase())
-            );
-
-            const targetGym: any = match || (list.length === 1 ? list[0] : null);
-            if (targetGym) {
-              console.log('[FirstRunSetup] Auto-connecting to existing gym workspace:', targetGym.id, targetGym.name);
-              await selectGym(targetGym.id);
-              return;
-            }
-          }
-        } catch (err: any) {
-          console.warn('[FirstRunSetup] Server scan error:', err);
-          if (isMounted) {
-            setScanError(err.message || 'Permission denied when reading existing gyms');
-          }
-        }
+        console.log('[FirstRunSetup] Auto-connecting to shared primary gym:', SHARED_GYM_ID);
+        await selectGym(SHARED_GYM_ID);
       } catch (err: any) {
-        console.warn('[FirstRunSetup] Overall scan error:', err);
+        console.warn('[FirstRunSetup] Auto-connect notice:', err);
+        if (isMounted) {
+          setScanError(err.message || 'Failed to auto-connect');
+        }
       } finally {
         if (isMounted) setScanning(false);
       }
@@ -129,7 +48,7 @@ export const FirstRunSetup: React.FC = () => {
 
     scanForGyms();
     return () => { isMounted = false; };
-  }, [user?.uid, user?.email]);
+  }, [selectGym]);
 
   const { register, handleSubmit, formState: { errors } } = useForm({
     resolver: zodResolver(gymSetupSchema),
@@ -145,18 +64,6 @@ export const FirstRunSetup: React.FC = () => {
       optionalTaxRate: 18,
     }
   });
-
-  const handleConnectExisting = async (gymId: string) => {
-    if (!gymId.trim()) return;
-    setLoading(true);
-    setError(null);
-    try {
-      await selectGym(gymId.trim());
-    } catch (err: any) {
-      setError(err.message || 'Failed to connect to gym workspace.');
-      setLoading(false);
-    }
-  };
 
   const onSubmit = async (data: any) => {
     if (!user || !user.uid) {

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { Login } from './features/auth/Login';
-import { FirstRunSetup } from './features/auth/FirstRunSetup';
 // Lazy loaded components for code splitting
 const Dashboard = React.lazy(() => import('./features/dashboard/Dashboard').then(m => ({ default: m.Dashboard })));
 const MembersList = React.lazy(() => import('./features/members/MembersList').then(m => ({ default: m.MembersList })));
@@ -75,17 +74,14 @@ const GymDeskApp: React.FC = () => {
     return <Login />;
   }
 
-  // Connecting or First-run setup
+  // Connecting to gym workspace
   if (!gym) {
-    if (isSuperAdmin) {
-      return (
-        <div className="min-h-screen bg-canvas flex flex-col justify-center items-center gap-3">
-          <div className="h-10 w-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-xs text-muted-gray font-medium">Connecting to your gym workspace...</p>
-        </div>
-      );
-    }
-    return <FirstRunSetup />;
+    return (
+      <div className="min-h-screen bg-canvas flex flex-col justify-center items-center gap-3">
+        <div className="h-10 w-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-xs text-muted-gray font-medium">Connecting to your gym workspace...</p>
+      </div>
+    );
   }
 
   // ---- Navigation helpers ----

@@ -1,11 +1,14 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { onAuthStateChanged, getRedirectResult } from 'firebase/auth';
-import { doc, getDoc, collection, query, where, getDocs, setDoc, getDocsFromCache } from 'firebase/firestore';
+import { doc, getDoc, collection, getDocs, setDoc, writeBatch } from 'firebase/firestore';
 import { auth, db, signInWithGoogle, logoutUser, offlineInitialized } from '../../services/firebase';
 import type { Gym, Staff, UserRole } from '../../types';
 import { SUPER_ADMIN_EMAILS } from '../../utils/constants';
 import { seedDemoData } from '../../utils/mockData';
+
+export const SHARED_GYM_ID = 'gym_main_workspace';
+
 
 interface AuthContextType {
   user: User | null;
@@ -52,8 +55,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isAnonymous: false,
     } as unknown as User;
 
-    const deterministicGymId = 'gym_' + targetEmail.replace(/[^a-zA-Z0-9]/g, '_');
-    localStorage.setItem('gymdesk_last_gym_id', deterministicGymId);
+    localStorage.setItem('gymdesk_last_gym_id', SHARED_GYM_ID);
     localStorage.setItem('gymdesk_mock_user', JSON.stringify(mockUser));
     window.location.reload();
   };
@@ -195,166 +197,98 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const findAndLoadGymForUser = async (currentUser: User) => {
     try {
-      let targetGymId: string | null = null;
-      let targetGymName: string | null = null;
+      // Unify all user accounts onto the exact same gym workspace so data is never split or lost
+      const targetGymName = 'GymDesk Elite Fitness';
 
-      // Step 1: Read user's own document
+      // Check candidate gyms where previous data might have been saved
+      const previousGymId = localStorage.getItem('gymdesk_last_gym_id');
+      const candidateGyms = [
+        previousGymId,
+        'gym_relationshitposting_gmail_com',
+        'gym_ux_siddharth_gmail_com',
+      ].filter((id): id is string => Boolean(id) && id !== SHARED_GYM_ID);
+
+      // Check if SHARED_GYM_ID already has members
+      let hasMembers = false;
       try {
-        const userRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userRef);
-        if (userSnap.exists()) {
-          const userData = userSnap.data();
-          if (userData.gyms && typeof userData.gyms === 'object') {
-            const list = Object.entries(userData.gyms).map(([id, info]: any) => ({
-              gymId: id,
-              role: (info.role || 'owner') as UserRole,
-              name: info.name || ''
-            }));
-            setGymsList(list);
-          }
-          targetGymId = userData.lastGymId
-            || (userData.gyms ? Object.keys(userData.gyms)[0] : null)
-            || null;
+        const primaryMembersSnap = await getDocs(collection(db, 'gyms', SHARED_GYM_ID, 'members'));
+        if (!primaryMembersSnap.empty) {
+          hasMembers = true;
         }
-      } catch (err) {
-        console.warn('[Auth] Could not read user doc:', err);
+      } catch (e) {
+        console.warn('[Auth] Primary check notice:', e);
       }
 
-      // Step 2: Fallback to localStorage
-      if (!targetGymId) {
-        const saved = localStorage.getItem('gymdesk_last_gym_id');
-        if (saved) {
-          targetGymId = saved;
-        }
-      }
-
-      // Step 3: Check if gym was created under mock-tester-uid (local development/testing migration)
-      if (!targetGymId) {
-        try {
-          const testerSnap = await getDoc(doc(db, 'users', 'mock-tester-uid'));
-          if (testerSnap.exists()) {
-            const tData = testerSnap.data();
-            targetGymId = tData.lastGymId || (tData.gyms ? Object.keys(tData.gyms)[0] : null);
-          }
-        } catch (e) {
-          // Ignore
-        }
-      }
-
-      // Step 4: Query gyms created by this user
-      if (!targetGymId) {
-        try {
-          const snap = await getDocs(query(collection(db, 'gyms'), where('createdBy', '==', currentUser.uid)));
-          if (!snap.empty) {
-            targetGymId = snap.docs[0].id;
-            targetGymName = snap.docs[0].data().name;
-          }
-        } catch (err) {
-          console.warn('[Auth] createdBy query skipped:', err);
-        }
-      }
-
-      // Step 5: Query by email field on gym doc
-      if (!targetGymId && currentUser.email) {
-        try {
-          const snap = await getDocs(query(collection(db, 'gyms'), where('email', '==', currentUser.email)));
-          if (!snap.empty) {
-            targetGymId = snap.docs[0].id;
-            targetGymName = snap.docs[0].data().name;
-          }
-        } catch (err) {
-          console.warn('[Auth] email query skipped:', err);
-        }
-      }
-
-      // Step 6: Broad query & local cache
-      if (!targetGymId) {
-        let gymsDocs: any[] = [];
-        try {
-          const allGymsSnap = await getDocs(collection(db, 'gyms'));
-          if (!allGymsSnap.empty) {
-            gymsDocs = allGymsSnap.docs;
-          }
-        } catch (err) {
-          console.warn('[Auth] Server broad gyms query skipped, checking cache...', err);
-        }
-
-        if (gymsDocs.length === 0) {
+      // If SHARED_GYM_ID is empty, check if candidate gyms have members to migrate over
+      if (!hasMembers) {
+        for (const candId of candidateGyms) {
           try {
-            const cacheSnap = await getDocsFromCache(collection(db, 'gyms'));
-            if (!cacheSnap.empty) {
-              gymsDocs = cacheSnap.docs;
-            }
-          } catch (e) {
-            // Ignore
-          }
-        }
-
-        if (gymsDocs.length > 0) {
-          let bestDoc = gymsDocs.find(d => {
-            const data = d.data();
-            return (
-              data.createdBy === currentUser.uid ||
-              (currentUser.email && data.email?.toLowerCase() === currentUser.email.toLowerCase())
-            );
-          });
-
-          if (!bestDoc) {
-            bestDoc = gymsDocs[0];
-          }
-
-          if (bestDoc) {
-            targetGymId = bestDoc.id;
-            targetGymName = bestDoc.data().name;
-          }
-        }
-      }
-
-      // Step 7: AUTOMATIC RECOVERY & PROVISIONING
-      // If no gym ID was found (e.g. fresh browser or Firestore blocked collection queries),
-      // auto-link to deterministic workspace so pre-existing admins/users NEVER get blocked!
-      if (!targetGymId) {
-        const cleanEmail = (currentUser.email || 'relationshitposting@gmail.com').trim().toLowerCase();
-        const deterministicGymId = 'gym_' + cleanEmail.replace(/[^a-zA-Z0-9]/g, '_');
-        targetGymId = deterministicGymId;
-        targetGymName = 'GymDesk Elite Fitness';
-        console.log('[Auth] Automatically linked user to gym workspace:', targetGymId);
-
-        // Seed demo members and plans if this workspace was not seeded yet
-        const seedKey = 'gymdesk_seeded_' + targetGymId;
-        if (!localStorage.getItem(seedKey)) {
-          try {
-            await seedDemoData(targetGymId, currentUser.uid, currentUser.displayName || 'Admin');
-            localStorage.setItem(seedKey, 'true');
-            console.log('[Auth] Initialized members, plans & dues for workspace:', targetGymId);
-          } catch (e) {
-            console.warn('[Auth] Seed demo data notice:', e);
-          }
-        }
-      }
-
-      if (targetGymId) {
-        localStorage.setItem('gymdesk_last_gym_id', targetGymId);
-        // Persist to user doc
-        try {
-          await setDoc(doc(db, 'users', currentUser.uid), {
-            uid: currentUser.uid,
-            email: currentUser.email || '',
-            lastGymId: targetGymId,
-            ...(targetGymName ? {
-              [`gyms.${targetGymId}`]: {
-                role: 'owner',
-                name: targetGymName
+            const candMembers = await getDocs(collection(db, 'gyms', candId, 'members'));
+            if (!candMembers.empty) {
+              console.log(`[Auth] Migrating ${candMembers.size} members from ${candId} to ${SHARED_GYM_ID}...`);
+              const batch = writeBatch(db);
+              candMembers.docs.forEach(d => {
+                batch.set(doc(db, 'gyms', SHARED_GYM_ID, 'members', d.id), d.data(), { merge: true });
+              });
+              for (const sub of ['memberships', 'dues', 'payments', 'plans']) {
+                try {
+                  const subSnap = await getDocs(collection(db, 'gyms', candId, sub));
+                  subSnap.docs.forEach(d => {
+                    batch.set(doc(db, 'gyms', SHARED_GYM_ID, sub, d.id), d.data(), { merge: true });
+                  });
+                } catch {
+                  // Ignore
+                }
               }
-            } : {})
-          }, { merge: true });
-        } catch (e) {
-          // Ignore
+              await batch.commit();
+              hasMembers = true;
+              break;
+            }
+          } catch (candErr) {
+            console.warn('[Auth] Candidate migration notice for', candId, candErr);
+          }
         }
-        await loadGymWorkspace(targetGymId, currentUser);
       }
+
+      // If still empty, seed the full demo members and plans
+      if (!hasMembers) {
+        try {
+          await seedDemoData(SHARED_GYM_ID, currentUser.uid, currentUser.displayName || 'Gym Owner');
+          console.log('[Auth] Initialized members, plans & dues for workspace:', SHARED_GYM_ID);
+        } catch (seedErr) {
+          console.warn('[Auth] Seed demo data notice:', seedErr);
+        }
+      }
+
+      // Persist workspace to user doc and localStorage
+      localStorage.setItem('gymdesk_last_gym_id', SHARED_GYM_ID);
+      setGymsList([{
+        gymId: SHARED_GYM_ID,
+        role: 'owner',
+        name: targetGymName
+      }]);
+
+      try {
+        await setDoc(doc(db, 'users', currentUser.uid), {
+          uid: currentUser.uid,
+          email: currentUser.email || '',
+          lastGymId: SHARED_GYM_ID,
+          gyms: {
+            [SHARED_GYM_ID]: {
+              role: 'owner',
+              name: targetGymName
+            }
+          }
+        }, { merge: true });
+      } catch (e) {
+        // Ignore
+      }
+
+      await loadGymWorkspace(SHARED_GYM_ID, currentUser);
     } catch (err) {
       console.error('[Auth] findAndLoadGymForUser error:', err);
+      // Resilient fallback
+      await loadGymWorkspace(SHARED_GYM_ID, currentUser);
     }
   };
 

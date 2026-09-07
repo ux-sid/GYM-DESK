@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import type { Member, Membership, Due, Payment } from '../../types';
 import { formatINR } from '../../utils/financeUtils';
@@ -51,62 +51,40 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onAddMember })
   useEffect(() => {
     if (!gym) return;
 
-    // Load Collections with real-time listeners - OPTIMIZED QUERIES
-    // Only load active members
-    const membersQuery = query(
-      collection(db, 'gyms', gym.id, 'members'),
-      where('recordStatus', '==', 'current')
-    );
-    const unsubMembers = onSnapshot(membersQuery, (snap) => {
-      setMembers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Member)));
+    // Load Collections with real-time listeners
+    const unsubMembers = onSnapshot(collection(db, 'gyms', gym.id, 'members'), (snap) => {
+      const allMembers = snap.docs.map(d => ({ id: d.id, ...d.data() } as Member));
+      const activeMembers = allMembers.filter(m => m.recordStatus !== 'archived');
+      setMembers(activeMembers);
+
+      // Auto-restore data if workspace has 0 members
+      if (snap.empty) {
+        import('../../utils/mockData').then(({ seedDemoData }) => {
+          seedDemoData(gym.id, 'owner', 'Gym Owner').catch(() => {});
+        });
+      }
     });
 
-    // Only load active memberships for dashboard stats
-    const membershipsQuery = query(
-      collection(db, 'gyms', gym.id, 'memberships'),
-      where('baseStatus', '==', 'active')
-    );
-    const unsubMemberships = onSnapshot(membershipsQuery, (snap) => {
+    const unsubMemberships = onSnapshot(collection(db, 'gyms', gym.id, 'memberships'), (snap) => {
       setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
     });
 
-    // Load dues that are unpaid to calculate outstanding amounts and overdue members
-    const duesQuery = query(
-      collection(db, 'gyms', gym.id, 'dues'),
-      where('balance', '>', 0)
-    );
-    const unsubDues = onSnapshot(duesQuery, (snap) => {
+    const unsubDues = onSnapshot(collection(db, 'gyms', gym.id, 'dues'), (snap) => {
       setDues(snap.docs.map(d => ({ id: d.id, ...d.data() } as Due)));
+    });
+
+    const unsubPayments = onSnapshot(collection(db, 'gyms', gym.id, 'payments'), (snap) => {
+      setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
+      setLoading(false);
     });
 
     return () => {
       unsubMembers();
       unsubMemberships();
       unsubDues();
+      unsubPayments();
     };
   }, [gym]);
-
-  // Handle Payments Separately when selectedMonth changes
-  useEffect(() => {
-    if (!gym || !selectedMonth) return;
-    setLoading(true);
-
-    const startOfMonthStr = `${selectedMonth}-01`;
-    const endOfMonthStr = `${selectedMonth}-31`; // simplified bound
-
-    const paymentsQuery = query(
-      collection(db, 'gyms', gym.id, 'payments'),
-      where('paymentDate', '>=', startOfMonthStr),
-      where('paymentDate', '<=', endOfMonthStr)
-    );
-
-    const unsubPayments = onSnapshot(paymentsQuery, (snap) => {
-      setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
-      setLoading(false);
-    });
-
-    return () => unsubPayments();
-  }, [gym, selectedMonth]);
 
   if (loading) {
     return (

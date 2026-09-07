@@ -50,6 +50,11 @@ export const PlansList: React.FC = () => {
 
     const unsubPlans = onSnapshot(collection(db, 'gyms', gym.id, 'plans'), (snap) => {
       setPlans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Plan)));
+      if (snap.empty) {
+        import('../../utils/mockData').then(({ seedDemoData }) => {
+          seedDemoData(gym.id, 'owner', 'Gym Owner').catch(() => {});
+        });
+      }
     });
 
     const unsubMemberships = onSnapshot(collection(db, 'gyms', gym.id, 'memberships'), (snap) => {
