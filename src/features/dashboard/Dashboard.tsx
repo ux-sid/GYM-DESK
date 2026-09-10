@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { db } from '../../services/firebase';
 import type { Member, Membership, Due, Payment } from '../../types';
 import { formatINR } from '../../utils/financeUtils';
@@ -49,39 +49,94 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onAddMember })
   const [selectedMonth, setSelectedMonth] = useState(currentMonthYear);
 
   useEffect(() => {
-    if (!gym) return;
-
-    // Load Collections with real-time listeners
-    const unsubMembers = onSnapshot(collection(db, 'gyms', gym.id, 'members'), (snap) => {
-      const allMembers = snap.docs.map(d => ({ id: d.id, ...d.data() } as Member));
-      const activeMembers = allMembers.filter(m => m.recordStatus !== 'archived');
-      setMembers(activeMembers);
-
-      // Auto-restore data if workspace has 0 members
-      if (snap.empty) {
-        import('../../utils/mockData').then(({ seedDemoData }) => {
-          seedDemoData(gym.id, 'owner', 'Gym Owner').catch(() => {});
-        });
-      }
-    });
-
-    const unsubMemberships = onSnapshot(collection(db, 'gyms', gym.id, 'memberships'), (snap) => {
-      setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
-    });
-
-    const unsubDues = onSnapshot(collection(db, 'gyms', gym.id, 'dues'), (snap) => {
-      setDues(snap.docs.map(d => ({ id: d.id, ...d.data() } as Due)));
-    });
-
-    const unsubPayments = onSnapshot(collection(db, 'gyms', gym.id, 'payments'), (snap) => {
-      setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
+    if (!gym) {
       setLoading(false);
-    });
+      return;
+    }
+
+    // Load Collections with real-time listeners - OPTIMIZED QUERIES
+    // Only load active members
+    const membersQuery = query(
+      collection(db, 'gyms', gym.id, 'members'),
+      where('recordStatus', '==', 'current')
+    );
+    const unsubMembers = onSnapshot(
+      membersQuery, 
+      (snap) => {
+        setMembers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Member)));
+      },
+      (err) => {
+        console.warn('Dashboard members snapshot error:', err);
+      }
+    );
+
+    // Only load active memberships for dashboard stats
+    const membershipsQuery = query(
+      collection(db, 'gyms', gym.id, 'memberships'),
+      where('baseStatus', '==', 'active')
+    );
+    const unsubMemberships = onSnapshot(
+      membershipsQuery, 
+      (snap) => {
+        setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
+      },
+      (err) => {
+        console.warn('Dashboard memberships snapshot error:', err);
+      }
+    );
+
+    // Load dues that are unpaid to calculate outstanding amounts and overdue members
+    const duesQuery = query(
+      collection(db, 'gyms', gym.id, 'dues'),
+      where('balance', '>', 0)
+    );
+    const unsubDues = onSnapshot(
+      duesQuery, 
+      (snap) => {
+        setDues(snap.docs.map(d => ({ id: d.id, ...d.data() } as Due)));
+      },
+      (err) => {
+        console.warn('Dashboard dues snapshot error:', err);
+      }
+    );
 
     return () => {
       unsubMembers();
       unsubMemberships();
       unsubDues();
+    };
+  }, [gym]);
+
+  // Load Payments for the gym
+  useEffect(() => {
+    if (!gym) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
+    const paymentsQuery = collection(db, 'gyms', gym.id, 'payments');
+
+    const unsubPayments = onSnapshot(
+      paymentsQuery, 
+      (snap) => {
+        clearTimeout(safetyTimer);
+        setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
+        setLoading(false);
+      },
+      (err) => {
+        clearTimeout(safetyTimer);
+        console.warn('Dashboard payments snapshot error:', err);
+        setLoading(false);
+      }
+    );
+
+    return () => {
+      clearTimeout(safetyTimer);
       unsubPayments();
     };
   }, [gym]);
@@ -166,13 +221,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onAddMember })
   // 1. Last 6 months net collections
   const last6MonthsData = Array.from({ length: 6 }).map((_, i) => {
     const d = new Date();
+    d.setDate(1); // Protect against end-of-month (28/30/31) month-skipping bugs
     d.setMonth(d.getMonth() - i);
-    const mStr = d.toISOString().substring(0, 7); // YYYY-MM
+    const year = d.getFullYear();
+    const monthNum = String(d.getMonth() + 1).padStart(2, '0');
+    const mStr = `${year}-${monthNum}`;
     const mLabel = d.toLocaleString('en-IN', { month: 'short', year: '2-digit' });
     
     const mPayments = payments.filter((p) => {
       if (p.status === 'void') return false;
-      return p.paymentDate.startsWith(mStr);
+      return (p.paymentDate || '').startsWith(mStr);
     });
     
     const g = mPayments.filter(p => p.type === 'payment').reduce((sum, p) => sum + p.amount, 0);
@@ -180,7 +238,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onAddMember })
     
     return {
       month: mLabel,
-      amount: g - r
+      amount: Math.max(0, g - r)
     };
   }).reverse();
 
@@ -342,6 +400,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onAddMember })
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1C1C1E', borderColor: '#2C2C30' }} 
                   labelStyle={{ color: '#FFFFFF' }} 
+                  formatter={(value: any) => [formatINR(Number(value) || 0, false), 'Net Collections']}
                 />
                 <Bar dataKey="amount" fill="#FF5C00" radius={[4, 4, 0, 0]} />
               </BarChart>

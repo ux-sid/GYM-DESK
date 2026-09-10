@@ -24,3 +24,15 @@ dist-ssr
 *.sw?
 
 .vercel
+
+# Firebase Admin Service Account & Credentials
+*-adminsdk-*.json
+*.pem
+*.key
+
+# Temporary scripts & data exports
+*.mjs
+*.cjs
+get_token.html
+export/
+scratch/

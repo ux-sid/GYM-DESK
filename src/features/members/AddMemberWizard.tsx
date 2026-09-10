@@ -12,9 +12,6 @@ function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
-  if (obj instanceof Date) {
-    return obj;
-  }
   if (Array.isArray(obj)) {
     return obj.map(cleanUndefined);
   }
@@ -57,7 +54,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
   // Image Upload State
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
-
+  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -123,8 +120,8 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     const plan = plans.find(p => p.id === selectedPlanId);
     if (!plan) return;
 
-    setCustomPrice(plan.standardPrice || 0);
-    setJoiningFee(plan.joiningFee || 0);
+    setCustomPrice(plan.standardPrice);
+    setJoiningFee(plan.joiningFee);
     
     // Auto end date
     const calcEnd = calculateMembershipEndDate(startDate, plan.durationValue, plan.durationUnit);
@@ -167,18 +164,14 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
   // Calculations for Step 2
   const plan = plans.find(p => p.id === selectedPlanId);
-  const safeCustomPrice = isNaN(customPrice) ? 0 : customPrice;
-  const safeJoiningFee = isNaN(joiningFee) ? 0 : joiningFee;
-  const safeDiscountValue = isNaN(discountValue) ? 0 : discountValue;
   const discountAmount = 
-    discountType === 'fixed' ? safeDiscountValue :
-    discountType === 'percentage' ? (safeCustomPrice * safeDiscountValue) / 100 : 0;
-  const safeDiscountAmount = isNaN(discountAmount) ? 0 : discountAmount;
+    discountType === 'fixed' ? discountValue :
+    discountType === 'percentage' ? (customPrice * discountValue) / 100 : 0;
   
-  const taxRate = gym?.taxEnabled ? (Number(gym.optionalTaxRate) || 18) : 0;
-  const taxableAmount = Math.max(0, safeCustomPrice + safeJoiningFee - safeDiscountAmount);
+  const taxRate = gym?.taxEnabled ? (gym.optionalTaxRate || 18) : 0;
+  const taxableAmount = Math.max(0, customPrice + joiningFee - discountAmount);
   const taxAmount = (taxableAmount * taxRate) / 100;
-  const finalAmount = Math.round((taxableAmount + taxAmount) * 100) / 100 || 0;
+  const finalAmount = parseFloat((taxableAmount + taxAmount).toFixed(2));
 
   // --- Step 1 UI Methods (Camera) ---
 
@@ -298,29 +291,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     setSaving(true);
     setSaveError(null);
 
-    const masterTimeout = setTimeout(() => {
-      setSaveError('Save operation timed out. Please check your connection and try again.');
-      setSaving(false);
-    }, 15000);
-
     try {
-      // 1. Process photo if provided (fast Storage upload with 3s timeout or instant Base64 fallback)
-      let photoPath: string | undefined = undefined;
+      let photoPath = '';
+
+      // 1. Upload photo to Firebase Storage
       if (photoBlob) {
-        try {
-          const uploadPromise = uploadMemberPhoto(gym.id, 'temp', photoBlob);
-          const uploadTimeout = new Promise<string>((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout')), 3000)
-          );
-          photoPath = await Promise.race([uploadPromise, uploadTimeout]);
-        } catch (photoErr) {
-          console.warn('Photo storage upload slow/failed, using inline data URL:', photoErr);
-          photoPath = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.readAsDataURL(photoBlob);
-          });
-        }
+        photoPath = await uploadMemberPhoto(gym.id, 'temp', photoBlob);
+        setUploadProgress(100);
       }
 
       // 2. Build Member object
@@ -362,13 +339,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         branchId: gym.defaultBranchId || 'main-branch',
         planId: selectedPlanId,
         planNameSnapshot: plan?.name || 'Custom Plan',
-        planPriceSnapshot: safeCustomPrice,
+        planPriceSnapshot: customPrice,
         startDate,
         endDate,
-        grossAmount: safeCustomPrice,
-        joiningFee: safeJoiningFee,
+        grossAmount: customPrice,
+        joiningFee,
         discountType,
-        discountValue: safeDiscountValue,
+        discountValue,
         discountAmount,
         taxAmount,
         finalAmount,
@@ -381,22 +358,21 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
       const durationMonths = plan?.durationUnit === 'months' ? plan.durationValue : 1;
       const duesRaw = generateDuesForMembership({
-        memberId: '',
+        memberId: '', // overwritten in atomic func
         membershipId: '',
         branchId: gym.defaultBranchId || 'main-branch',
         startDate,
         endDate,
         finalAmount,
-        grossAmount: safeCustomPrice,
-        joiningFee: safeJoiningFee,
+        grossAmount: customPrice,
+        joiningFee,
         discountAmount,
         taxAmount,
         billingFrequency: plan?.billingFrequency || 'upfront',
         durationMonths,
       });
 
-      // 3. Run atomic transaction (includes photoStoragePath in payload)
-      const savePromise = addMemberCompleteAtomic(
+      const savedMemberId = await addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
         cleanUndefined(membershipPayload),
@@ -405,9 +381,9 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
           branchId: gym.defaultBranchId || 'main-branch',
           type: 'payment',
           amount: paymentAmount,
+          paymentDate: startDate,
           paymentMethod,
           transactionReference: transactionRef ? transactionRef : null,
-          paymentDate: startDate,
           note: null,
           status: 'completed',
           createdBy: user.uid
@@ -415,19 +391,10 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         user.uid, 
         user.displayName || 'Owner'
       );
-      
-      const txnTimeout = new Promise<string>((_, reject) => 
-        setTimeout(() => reject(new Error('Database save timed out. Please try again.')), 10000)
-      );
-      
-      const savedMemberId = await Promise.race([savePromise, txnTimeout]);
-      clearTimeout(masterTimeout);
 
       onSuccess(savedMemberId);
     } catch (err: any) {
-      console.error('handleSave error:', err);
-      clearTimeout(masterTimeout);
-      setSaveError(err?.message || String(err) || 'An error occurred while saving the member.');
+      setSaveError(err.message || 'An error occurred while saving the member.');
     } finally {
       setSaving(false);
     }
@@ -696,8 +663,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <input
                     type="number"
                     value={customPrice}
-                    onChange={e => { const v = parseFloat(e.target.value); setCustomPrice(isNaN(v) ? 0 : v); }}
-                    placeholder="0"
+                    onChange={e => setCustomPrice(parseFloat(e.target.value) || 0)}
                     className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   />
                 </div>
@@ -707,8 +673,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <input
                     type="number"
                     value={joiningFee}
-                    onChange={e => { const v = parseFloat(e.target.value); setJoiningFee(isNaN(v) ? 0 : v); }}
-                    placeholder="0"
+                    onChange={e => setJoiningFee(parseFloat(e.target.value) || 0)}
                     className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   />
                 </div>
@@ -735,7 +700,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                     <input
                       type="number"
                       value={discountValue}
-                      onChange={e => { const v = parseFloat(e.target.value); setDiscountValue(isNaN(v) ? 0 : v); }}
+                      onChange={e => setDiscountValue(parseFloat(e.target.value) || 0)}
                       className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                       placeholder="e.g. 500"
                     />
@@ -749,7 +714,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                   <span>Gross Plan Price:</span>
                   <span>₹{customPrice}</span>
                 </div>
-                {safeJoiningFee > 0 && (
+                {joiningFee > 0 && (
                   <div className="flex justify-between text-muted-gray">
                     <span>Joining Fee:</span>
                     <span>+ ₹{joiningFee}</span>
@@ -805,13 +770,12 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
                 <input
                   type="number"
                   value={paymentAmount}
-                  onChange={e => { const v = parseFloat(e.target.value); setPaymentAmount(isNaN(v) ? 0 : v); }}
-                  placeholder="0"
+                  onChange={e => setPaymentAmount(parseFloat(e.target.value) || 0)}
                   className="w-full bg-canvas border border-border-muted text-sm rounded-xl px-4 py-2 text-text-main outline-none"
                   max={finalAmount}
                 />
                 <span className="text-[10px] text-muted-gray">
-                  Remaining unpaid balance: <span className="text-text-main font-bold">₹{Math.round((finalAmount - paymentAmount) * 100) / 100}</span>
+                  Remaining unpaid balance: <span className="text-text-main font-bold">₹{parseFloat((finalAmount - paymentAmount).toFixed(2))}</span>
                 </span>
               </div>
 
@@ -979,7 +943,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
             {saving ? (
               <>
                 <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                <span>Saving...</span>
+                <span>Saving... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
               </>
             ) : (
               <>

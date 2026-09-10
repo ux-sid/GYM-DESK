@@ -1,25 +1,108 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import type { User } from 'firebase/auth';
 import { onAuthStateChanged, getRedirectResult } from 'firebase/auth';
-import { doc, getDoc, collection, getDocs, setDoc, writeBatch } from 'firebase/firestore';
+import { doc, getDoc, updateDoc, collection, getDocs, query, where, enableNetwork } from 'firebase/firestore';
 import { auth, db, signInWithGoogle, logoutUser, offlineInitialized } from '../../services/firebase';
 import type { Gym, Staff, UserRole } from '../../types';
-import { SUPER_ADMIN_EMAILS } from '../../utils/constants';
-import { seedDemoData } from '../../utils/mockData';
+import { MASTER_ADMIN_EMAIL, normalizeEmail, isMasterAdmin } from '../../utils/constants';
 
-export const SHARED_GYM_ID = 'gym_main_workspace';
+// Known gym workspace definitions for fallback recovery
+const KNOWN_GYMS: Record<string, Partial<Gym>> = {
+  'uVRMtHa6ETYi6RQ7Dqla': {
+    id: 'uVRMtHa6ETYi6RQ7Dqla',
+    name: 'Fit X Gym',
+    phone: '',
+    email: 'shreeomkumawat276@gmail.com',
+    timezone: 'Asia/Kolkata',
+    currency: 'INR',
+    locale: 'en-IN',
+    defaultBranchId: 'main-branch',
+    receiptPrefix: 'RCPT',
+    taxEnabled: false,
+    privacyNoticeVersion: '1.0',
+    createdBy: 'r0F3lLglfFRk8HSGHFE0MMrjNCq2',
+  },
+  'iM9vuuBEGnuFguoNXyzw': {
+    id: 'iM9vuuBEGnuFguoNXyzw',
+    name: 'RELATIONSHIT POST',
+    phone: '',
+    email: 'relationshitposting@gmail.com',
+    timezone: 'Asia/Kolkata',
+    currency: 'INR',
+    locale: 'en-IN',
+    defaultBranchId: 'main-branch',
+    receiptPrefix: 'RCPT',
+    taxEnabled: false,
+    privacyNoticeVersion: '1.0',
+    createdBy: 'IFf1m9xlQSOlpOz8uhWBOr2khuF3',
+  },
+  'gZepq404iaBIyPzcnBJ1': {
+    id: 'gZepq404iaBIyPzcnBJ1',
+    name: 'TEST GYM',
+    phone: '',
+    email: 'test@gymdesk.in',
+    timezone: 'Asia/Kolkata',
+    currency: 'INR',
+    locale: 'en-IN',
+    defaultBranchId: 'main-branch',
+    receiptPrefix: 'RCPT',
+    taxEnabled: false,
+    privacyNoticeVersion: '1.0',
+    createdBy: 'mock-tester-uid',
+  }
+};
 
+// Known email to gymId mappings
+const KNOWN_EMAIL_TO_GYM: Record<string, string> = {
+  'shreeomkumawat276@gmail.com': 'uVRMtHa6ETYi6RQ7Dqla',
+  'relationshitposting@gmail.com': 'iM9vuuBEGnuFguoNXyzw',
+  'ux.siddharth@gmail.com': 'uVRMtHa6ETYi6RQ7Dqla'
+};
+
+export function createDefaultGym(id: string, name: string, email: string, ownerUid: string): Gym {
+  const known = KNOWN_GYMS[id];
+  return {
+    id,
+    name: known?.name || name || 'Fit X Gym',
+    phone: known?.phone || '',
+    email: known?.email || email || '',
+    timezone: known?.timezone || 'Asia/Kolkata',
+    currency: known?.currency || 'INR',
+    locale: known?.locale || 'en-IN',
+    defaultBranchId: known?.defaultBranchId || 'main-branch',
+    receiptPrefix: known?.receiptPrefix || 'RCPT',
+    taxEnabled: false,
+    privacyNoticeVersion: '1.0',
+    reminderTemplates: {
+      feeDueEnglish: 'Dear member, your fee is due.',
+      feeDueHindi: 'Priya sadasya, aapki fees baki hai.',
+      expiryEnglish: 'Dear member, your membership is expiring soon.',
+      expiryHindi: 'Priya sadasya, aapki membership jald samapt ho rahi hai.'
+    },
+    retentionSettings: {
+      archivedRetentionDays: 365,
+      enableRetentionReminders: true
+    },
+    createdBy: known?.createdBy || ownerUid,
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
+}
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  isEmailLookupLoading: boolean;
+  isExistingUser: boolean;
+  isMasterAdmin: boolean;
+  authError: string | null;
   gym: Gym | null;
   staffRecord: Staff | null;
   role: UserRole | null;
   gymsList: { gymId: string; role: UserRole; name: string }[];
   selectGym: (gymId: string) => Promise<void>;
-  login: (preferRedirect?: boolean) => Promise<void>;
-  loginBypass: (emailOverride?: string) => Promise<void>;
+  login: () => Promise<void>;
+  loginBypass: () => Promise<void>;
   logout: () => Promise<void>;
   refreshGymData: () => Promise<void>;
 }
@@ -29,33 +112,41 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isEmailLookupLoading, setIsEmailLookupLoading] = useState(false);
+  const [isExistingUser, setIsExistingUser] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [gym, setGym] = useState<Gym | null>(null);
   const [staffRecord, setStaffRecord] = useState<Staff | null>(null);
   const [role, setRole] = useState<UserRole | null>(null);
   const [gymsList, setGymsList] = useState<{ gymId: string; role: UserRole; name: string }[]>([]);
 
   const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  const userIsMasterAdmin = isMasterAdmin(user?.email);
 
-  const login = async (preferRedirect?: boolean) => {
-    await signInWithGoogle(preferRedirect !== undefined ? preferRedirect : isMobile);
+  const login = async () => {
+    setAuthError(null);
+    localStorage.removeItem('gymdesk_mock_user');
+    localStorage.removeItem('gymdesk_offline_mode');
+    try {
+      await enableNetwork(db);
+    } catch {
+      // already enabled
+    }
+    await signInWithGoogle(isMobile);
   };
 
-  const loginBypass = async (emailOverride?: string) => {
-    // Keep network online so live Firestore data is always loaded
-    localStorage.removeItem('gymdesk_offline_mode');
+  const loginBypass = async () => {
+    localStorage.setItem('gymdesk_offline_mode', 'true');
     localStorage.setItem('gymdesk_trusted_device', 'true');
-    const targetEmail = (emailOverride || 'relationshitposting@gmail.com').trim().toLowerCase();
-    const isAdmin = SUPER_ADMIN_EMAILS.some(e => e.toLowerCase() === targetEmail);
     const mockUser = {
-      uid: isAdmin ? 'admin-sid-uid' : `mock-${targetEmail.replace(/[^a-zA-Z0-9]/g, '-')}`,
-      email: targetEmail,
-      displayName: isAdmin ? 'Gym Admin' : 'Gym Owner',
+      uid: 'mock-tester-uid',
+      email: 'tester@gymdesk.in',
+      displayName: 'Local Tester',
       photoURL: 'https://images.unsplash.com/photo-1534438327276-14e5300c3a48',
       emailVerified: true,
       isAnonymous: false,
     } as unknown as User;
 
-    localStorage.setItem('gymdesk_last_gym_id', SHARED_GYM_ID);
     localStorage.setItem('gymdesk_mock_user', JSON.stringify(mockUser));
     window.location.reload();
   };
@@ -69,108 +160,88 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setStaffRecord(null);
     setRole(null);
     setGymsList([]);
+    setIsExistingUser(false);
+    setIsEmailLookupLoading(false);
   };
 
-  const loadGymWorkspace = async (gymId: string, currentUser: User) => {
+  const loadGymWorkspace = async (gymId: string, currentUser: User): Promise<Gym | null> => {
     try {
       let gymData: Gym | null = null;
       try {
         const gymSnap = await getDoc(doc(db, 'gyms', gymId));
         if (gymSnap.exists()) {
-          gymData = gymSnap.data() as Gym;
+          gymData = { id: gymSnap.id, ...gymSnap.data() } as Gym;
         }
       } catch (err) {
-        console.warn('[Auth] Server fetch for gym doc failed, checking cache...', err);
+        console.warn(`Direct fetch of gym doc ${gymId} failed, using fallback:`, err);
       }
 
-      // Check cached gym object in localStorage
       if (!gymData) {
-        const cached = localStorage.getItem('gymdesk_cached_gym_' + gymId);
-        if (cached) {
-          try {
-            gymData = JSON.parse(cached);
-          } catch {
-            // Ignore
-          }
+        // Fallback to known gym definition
+        const known = KNOWN_GYMS[gymId];
+        if (known) {
+          gymData = createDefaultGym(gymId, known.name || '', known.email || '', known.createdBy || currentUser.uid);
         }
       }
 
-      // If still not found, construct resilient default gym workspace
-      if (!gymData) {
-        gymData = {
-          id: gymId,
-          name: 'GymDesk Elite Fitness',
-          phone: '9876543210',
-          email: currentUser.email || 'admin@gymdesk.in',
-          address: 'Main Branch',
-          timezone: 'Asia/Kolkata',
-          currency: 'INR',
-          locale: 'en-IN',
-          defaultBranchId: 'main-branch',
-          receiptPrefix: 'RCPT',
-          taxEnabled: false,
-          privacyNoticeVersion: '1.0',
-          reminderTemplates: {
-            feeDueEnglish: 'Hi {member_name}, this is a reminder from {gym_name} that your outstanding balance of {amount} is due on {due_date}. Please clear it. Phone: {gym_phone}',
-            feeDueHindi: 'नमस्ते {member_name}, यह {gym_name} से एक रिमाइंडर है कि आपका बकाया {amount} {due_date} को देय है। कृपया भुगतान करें। फोन: {gym_phone}',
-            expiryEnglish: 'Hi {member_name}, your membership at {gym_name} expires on {due_date}. Please renew it to continue. Phone: {gym_phone}',
-            expiryHindi: 'नमस्ते {member_name}, {gym_name} में आपकी सदस्यता {due_date} को समाप्त हो रही है। कृपया जारी रखने के लिए रिन्यू करें। फोन: {gym_phone}',
-          },
-          retentionSettings: {
-            archivedRetentionDays: 365,
-            enableRetentionReminders: true,
-          },
-          createdBy: currentUser.uid,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
+      if (!gymData) return null;
 
-        // Try writing to Firestore in background
-        setDoc(doc(db, 'gyms', gymId), gymData, { merge: true }).catch(err => console.warn('[Auth] Background gym save notice:', err));
-      }
-
-      // Cache locally and set state
-      localStorage.setItem('gymdesk_cached_gym_' + gymId, JSON.stringify(gymData));
-      localStorage.setItem('gymdesk_last_gym_id', gymId);
       setGym(gymData);
 
-      // 2. Fetch staff role
-      try {
-        const staffSnap = await getDoc(doc(db, 'gyms', gymId, 'staff', currentUser.uid));
-        if (staffSnap.exists()) {
-          const sRecord = staffSnap.data() as Staff;
-          setStaffRecord(sRecord);
-          setRole(sRecord.role);
-          return;
+      // Check staff role
+      const isSuper = isMasterAdmin(currentUser.email);
+      if (isSuper) {
+        setStaffRecord({
+          uid: currentUser.uid,
+          fullName: currentUser.displayName || 'Master Admin',
+          email: currentUser.email || MASTER_ADMIN_EMAIL,
+          role: 'owner',
+          joinedAt: new Date(),
+          status: 'active'
+        });
+        setRole('owner');
+      } else {
+        try {
+          const staffSnap = await getDoc(doc(db, 'gyms', gymId, 'staff', currentUser.uid));
+          if (staffSnap.exists()) {
+            const sRecord = staffSnap.data() as Staff;
+            setStaffRecord(sRecord);
+            setRole(sRecord.role);
+          } else {
+            // Check if user is the creator or matches gym email
+            if (gymData.createdBy === currentUser.uid || (gymData.email && normalizeEmail(gymData.email) === normalizeEmail(currentUser.email))) {
+              setStaffRecord({
+                uid: currentUser.uid,
+                fullName: currentUser.displayName || 'Gym Owner',
+                email: currentUser.email || '',
+                role: 'owner',
+                joinedAt: new Date(),
+                status: 'active'
+              });
+              setRole('owner');
+            } else {
+              setStaffRecord(null);
+              setRole(null);
+            }
+          }
+        } catch {
+          // Default to owner for creator
+          setStaffRecord({
+            uid: currentUser.uid,
+            fullName: currentUser.displayName || 'Gym Owner',
+            email: currentUser.email || '',
+            role: 'owner',
+            joinedAt: new Date(),
+            status: 'active'
+          });
+          setRole('owner');
         }
-      } catch {
-        // Fall through to owner assignment
       }
 
-      // Automatically give owner role so authenticated user is never locked out
-      const ownerRecord: Staff = {
-        uid: currentUser.uid,
-        fullName: currentUser.displayName || (currentUser.email ? currentUser.email.split('@')[0] : 'Gym Owner'),
-        email: currentUser.email || '',
-        role: 'owner',
-        joinedAt: new Date(),
-        status: 'active'
-      };
-      setStaffRecord(ownerRecord);
-      setRole('owner');
-
-      // Link staff in background
-      setDoc(doc(db, 'gyms', gymId, 'staff', currentUser.uid), {
-        uid: currentUser.uid,
-        fullName: currentUser.displayName || 'Gym Owner',
-        email: currentUser.email || '',
-        role: 'owner',
-        joinedAt: new Date(),
-        status: 'active'
-      }, { merge: true }).catch(err => console.warn('[Auth] Background staff link notice:', err));
-
+      return gymData;
     } catch (err) {
-      console.error('[Auth] Error in loadGymWorkspace:', err);
+      console.error('Error loading gym workspace:', err);
+      return null;
     }
   };
 
@@ -178,10 +249,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) return;
     setLoading(true);
     try {
-      localStorage.setItem('gymdesk_last_gym_id', gymId);
       await loadGymWorkspace(gymId, user);
-      const userRef = doc(db, 'users', user.uid);
-      await setDoc(userRef, { lastGymId: gymId }, { merge: true }).catch(err => console.warn('Could not update user doc with lastGymId:', err));
+      try {
+        const userRef = doc(db, 'users', user.uid);
+        await updateDoc(userRef, { lastGymId: gymId });
+      } catch {
+        // ignore update failure if rule blocks
+      }
     } catch (e) {
       console.error('Error selecting gym:', e);
     } finally {
@@ -192,103 +266,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshGymData = async () => {
     if (gym && user) {
       await loadGymWorkspace(gym.id, user);
-    }
-  };
-
-  const findAndLoadGymForUser = async (currentUser: User) => {
-    try {
-      // Unify all user accounts onto the exact same gym workspace so data is never split or lost
-      const targetGymName = 'GymDesk Elite Fitness';
-
-      // Check candidate gyms where previous data might have been saved
-      const previousGymId = localStorage.getItem('gymdesk_last_gym_id');
-      const candidateGyms = [
-        previousGymId,
-        'gym_relationshitposting_gmail_com',
-        'gym_ux_siddharth_gmail_com',
-      ].filter((id): id is string => Boolean(id) && id !== SHARED_GYM_ID);
-
-      // Check if SHARED_GYM_ID already has members
-      let hasMembers = false;
-      try {
-        const primaryMembersSnap = await getDocs(collection(db, 'gyms', SHARED_GYM_ID, 'members'));
-        if (!primaryMembersSnap.empty) {
-          hasMembers = true;
-        }
-      } catch (e) {
-        console.warn('[Auth] Primary check notice:', e);
-      }
-
-      // If SHARED_GYM_ID is empty, check if candidate gyms have members to migrate over
-      if (!hasMembers) {
-        for (const candId of candidateGyms) {
-          try {
-            const candMembers = await getDocs(collection(db, 'gyms', candId, 'members'));
-            if (!candMembers.empty) {
-              console.log(`[Auth] Migrating ${candMembers.size} members from ${candId} to ${SHARED_GYM_ID}...`);
-              const batch = writeBatch(db);
-              candMembers.docs.forEach(d => {
-                batch.set(doc(db, 'gyms', SHARED_GYM_ID, 'members', d.id), d.data(), { merge: true });
-              });
-              for (const sub of ['memberships', 'dues', 'payments', 'plans']) {
-                try {
-                  const subSnap = await getDocs(collection(db, 'gyms', candId, sub));
-                  subSnap.docs.forEach(d => {
-                    batch.set(doc(db, 'gyms', SHARED_GYM_ID, sub, d.id), d.data(), { merge: true });
-                  });
-                } catch {
-                  // Ignore
-                }
-              }
-              await batch.commit();
-              hasMembers = true;
-              break;
-            }
-          } catch (candErr) {
-            console.warn('[Auth] Candidate migration notice for', candId, candErr);
-          }
-        }
-      }
-
-      // If still empty, seed the full demo members and plans
-      if (!hasMembers) {
-        try {
-          await seedDemoData(SHARED_GYM_ID, currentUser.uid, currentUser.displayName || 'Gym Owner');
-          console.log('[Auth] Initialized members, plans & dues for workspace:', SHARED_GYM_ID);
-        } catch (seedErr) {
-          console.warn('[Auth] Seed demo data notice:', seedErr);
-        }
-      }
-
-      // Persist workspace to user doc and localStorage
-      localStorage.setItem('gymdesk_last_gym_id', SHARED_GYM_ID);
-      setGymsList([{
-        gymId: SHARED_GYM_ID,
-        role: 'owner',
-        name: targetGymName
-      }]);
-
-      try {
-        await setDoc(doc(db, 'users', currentUser.uid), {
-          uid: currentUser.uid,
-          email: currentUser.email || '',
-          lastGymId: SHARED_GYM_ID,
-          gyms: {
-            [SHARED_GYM_ID]: {
-              role: 'owner',
-              name: targetGymName
-            }
-          }
-        }, { merge: true });
-      } catch (e) {
-        // Ignore
-      }
-
-      await loadGymWorkspace(SHARED_GYM_ID, currentUser);
-    } catch (err) {
-      console.error('[Auth] findAndLoadGymForUser error:', err);
-      // Resilient fallback
-      await loadGymWorkspace(SHARED_GYM_ID, currentUser);
     }
   };
 
@@ -309,11 +286,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const loadMockWorkspace = async () => {
           try {
             await offlineInitialized;
-            await findAndLoadGymForUser(mockUser);
+            const targetGymId = 'uVRMtHa6ETYi6RQ7Dqla';
+            await loadGymWorkspace(targetGymId, mockUser);
+            setIsExistingUser(true);
           } catch (err) {
-            console.warn('Failed to load mock workspace:', err);
+            console.warn('Failed to load local offline profile:', err);
           } finally {
             setLoading(false);
+            setIsEmailLookupLoading(false);
           }
         };
 
@@ -324,41 +304,146 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // Handle redirect results for all devices (desktop and mobile)
-    getRedirectResult(auth)
-      .then((result) => {
-        if (result?.user) {
-          setUser(result.user);
+    // Handle redirect results for mobile devices
+    if (isMobile) {
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result?.user) {
+            setUser(result.user);
+          }
+        })
+        .catch((error) => {
+          console.error('Redirect sign-in error:', error);
+          setAuthError(error.message || 'Mobile redirect sign-in failed');
+        });
+    }
+
+    // Safety timeout to prevent infinite spinner
+    const safetyTimer = setTimeout(() => {
+      setLoading((prev) => {
+        if (prev) {
+          console.warn('Auth loading safety timeout triggered after 6 seconds.');
+          return false;
         }
-      })
-      .catch((error) => {
-        console.error('Redirect sign-in error:', error);
+        return false;
       });
+      setIsEmailLookupLoading(false);
+    }, 6000);
 
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
-      if (currentUser) {
-        try {
-          await findAndLoadGymForUser(currentUser);
-        } catch (err) {
-          console.error('[AuthContext] Error in findAndLoadGymForUser:', err);
-        }
-      } else {
+      setLoading(false);
+
+      if (!currentUser) {
         setGym(null);
         setStaffRecord(null);
         setRole(null);
         setGymsList([]);
+        setIsExistingUser(false);
+        setIsEmailLookupLoading(false);
+        clearTimeout(safetyTimer);
+        return;
       }
-      setLoading(false);
+
+      setIsEmailLookupLoading(true);
+      const normalizedEmail = normalizeEmail(currentUser.email);
+
+      // --- STRICT MASTER ADMIN CHECK ---
+      if (isMasterAdmin(normalizedEmail)) {
+        setIsExistingUser(true);
+        setRole('owner');
+        // If master admin had a target gym, pre-load it, otherwise ready for portal
+        const targetGymId = 'uVRMtHa6ETYi6RQ7Dqla';
+        await loadGymWorkspace(targetGymId, currentUser);
+        setIsEmailLookupLoading(false);
+        clearTimeout(safetyTimer);
+        return;
+      }
+
+      // --- REGULAR USER ACCOUNT RESOLUTION VIA GMAIL ---
+      try {
+        let resolvedGymId: string | null = null;
+
+        // Step 1: Check known email mappings
+        if (KNOWN_EMAIL_TO_GYM[normalizedEmail]) {
+          resolvedGymId = KNOWN_EMAIL_TO_GYM[normalizedEmail];
+        }
+
+        // Step 2: Check users collection by UID
+        if (!resolvedGymId) {
+          try {
+            const userSnap = await getDoc(doc(db, 'users', currentUser.uid));
+            if (userSnap.exists()) {
+              const uData = userSnap.data();
+              if (uData.lastGymId) resolvedGymId = uData.lastGymId;
+              else if (uData.gyms && Object.keys(uData.gyms).length > 0) {
+                resolvedGymId = Object.keys(uData.gyms)[0];
+              }
+            }
+          } catch (err) {
+            console.warn('User doc lookup by UID failed:', err);
+          }
+        }
+
+        // Step 3: Query users collection by email
+        if (!resolvedGymId) {
+          try {
+            const q = query(collection(db, 'users'), where('email', '==', normalizedEmail));
+            const snap = await getDocs(q);
+            if (!snap.empty) {
+              const uData = snap.docs[0].data();
+              if (uData.lastGymId) resolvedGymId = uData.lastGymId;
+              else if (uData.gyms && Object.keys(uData.gyms).length > 0) {
+                resolvedGymId = Object.keys(uData.gyms)[0];
+              }
+            }
+          } catch (err) {
+            console.warn('User query by email failed:', err);
+          }
+        }
+
+        // Step 4: Check localStorage cache for this email
+        if (!resolvedGymId) {
+          const cachedGymId = localStorage.getItem(`gymdesk_gym_${normalizedEmail}`);
+          if (cachedGymId) resolvedGymId = cachedGymId;
+        }
+
+        // --- OUTCOME ---
+        if (resolvedGymId) {
+          const loadedGym = await loadGymWorkspace(resolvedGymId, currentUser);
+          if (loadedGym) {
+            setIsExistingUser(true);
+            localStorage.setItem(`gymdesk_gym_${normalizedEmail}`, resolvedGymId);
+          } else {
+            setIsExistingUser(false);
+          }
+        } else {
+          // No gym exists anywhere for this email
+          setIsExistingUser(false);
+        }
+      } catch (err: any) {
+        console.error('Account lookup error:', err);
+        setAuthError(err.message || 'Failed to lookup account');
+      } finally {
+        setIsEmailLookupLoading(false);
+        clearTimeout(safetyTimer);
+      }
     });
 
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(safetyTimer);
+      unsubscribe();
+    };
   }, []);
 
   return (
     <AuthContext.Provider value={{
       user,
       loading,
+      isEmailLookupLoading,
+      isExistingUser,
+      isMasterAdmin: userIsMasterAdmin,
+      authError,
       gym,
       staffRecord,
       role,

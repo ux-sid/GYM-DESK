@@ -16,7 +16,7 @@ function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
-  if (obj instanceof Date) {
+  if (obj.constructor && obj.constructor.name !== 'Object' && !Array.isArray(obj)) {
     return obj;
   }
   if (Array.isArray(obj)) {
@@ -90,8 +90,8 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
   const [renewPlanId, setRenewPlanId] = useState('');
   const [renewCustomPrice, setRenewCustomPrice] = useState(0);
   const [renewJoiningFee, setRenewJoiningFee] = useState(0);
-  const [renewStartDateOption, setRenewStartDateOption] = useState<'immediate' | 'after_end' | 'custom'>('immediate');
-  const [renewCustomStartDate, setRenewCustomStartDate] = useState(getKolkataTodayString());
+  const [renewStartDateOption, setRenewStartDateOption] = useState<'immediate' | 'after_end'>('immediate');
+  const [renewStartDate, setRenewStartDate] = useState(getKolkataTodayString());
 
   const [freezeStart, setFreezeStart] = useState(getKolkataTodayString());
   const [freezeEnd, setFreezeEnd] = useState(getKolkataTodayString());
@@ -106,50 +106,75 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
   const todayStr = getKolkataTodayString();
 
   useEffect(() => {
-    if (!gym) return;
+    if (!gym) {
+      setLoading(false);
+      return;
+    }
 
-    const unsubMember = onSnapshot(doc(db, 'gyms', gym.id, 'members', memberId), (snap) => {
-      if (snap.exists()) {
-        setMember({ id: snap.id, ...snap.data() } as Member);
-      } else {
-        setMember(null);
-      }
-    });
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
+    const unsubMember = onSnapshot(
+      doc(db, 'gyms', gym.id, 'members', memberId), 
+      (snap) => {
+        if (snap.exists()) {
+          setMember({ id: snap.id, ...snap.data() } as Member);
+        } else {
+          setMember(null);
+        }
+      },
+      (err) => console.warn('Member snapshot error:', err)
+    );
 
     const unsubMemberships = onSnapshot(
       query(collection(db, 'gyms', gym.id, 'memberships'), where('memberId', '==', memberId)),
       (snap) => {
         setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
-      }
+      },
+      (err) => console.warn('Memberships snapshot error:', err)
     );
 
     const unsubDues = onSnapshot(
       query(collection(db, 'gyms', gym.id, 'dues'), where('memberId', '==', memberId)),
       (snap) => {
         setDues(snap.docs.map(d => ({ id: d.id, ...d.data() } as Due)));
-      }
+      },
+      (err) => console.warn('Dues snapshot error:', err)
     );
 
     const unsubPayments = onSnapshot(
       query(collection(db, 'gyms', gym.id, 'payments'), where('memberId', '==', memberId)),
       (snap) => {
         setPayments(snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
-      }
+      },
+      (err) => console.warn('Payments snapshot error:', err)
     );
 
     const unsubLogs = onSnapshot(
       query(collection(db, 'gyms', gym.id, 'auditLogs'), where('entityId', '==', memberId)),
       (snap) => {
         setAuditLogs(snap.docs.map(d => ({ id: d.id, ...d.data() } as AuditLog)));
+      },
+      (err) => console.warn('Logs snapshot error:', err)
+    );
+
+    const unsubPlans = onSnapshot(
+      collection(db, 'gyms', gym.id, 'plans'), 
+      (snap) => {
+        clearTimeout(safetyTimer);
+        setPlans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Plan)));
+        setLoading(false);
+      },
+      (err) => {
+        clearTimeout(safetyTimer);
+        console.warn('Plans snapshot error:', err);
+        setLoading(false);
       }
     );
 
-    const unsubPlans = onSnapshot(collection(db, 'gyms', gym.id, 'plans'), (snap) => {
-      setPlans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Plan)));
-      setLoading(false);
-    });
-
     return () => {
+      clearTimeout(safetyTimer);
       unsubMember();
       unsubMemberships();
       unsubDues();
@@ -240,25 +265,16 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gym || !user || !member) return;
+    if (!gym || !user) return;
     setEditSaving(true);
     setEditError(null);
 
-    const masterTimeout = setTimeout(() => {
-      setEditError('Update timed out. Please check your connection and try again.');
-      setEditSaving(false);
-    }, 15000);
-
     try {
-      let newPhotoPath = member.photoStoragePath;
+      let newPhotoPath = member!.photoStoragePath;
       if (editPhotoFile) {
-        try {
-          const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
-          if (photoPath) {
-            newPhotoPath = photoPath;
-          }
-        } catch (photoErr) {
-          console.warn('Photo upload failed during profile edit:', photoErr);
+        const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
+        if (photoPath) {
+          newPhotoPath = photoPath;
         }
       }
 
@@ -286,13 +302,9 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         user.uid,
         user.displayName || 'Owner'
       );
-
-      clearTimeout(masterTimeout);
-      setEditPhotoFile(null);
       setShowEditModal(false);
     } catch (err: any) {
-      console.error('handleSaveEdit error:', err);
-      clearTimeout(masterTimeout);
+      console.error(err);
       setEditError(err.message || 'Failed to update member.');
     } finally {
       setEditSaving(false);
@@ -305,7 +317,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
     try {
       const paymentPayload: any = {
         memberId,
-        branchId: member.branchId || gym.defaultBranchId || 'main-branch',
+        branchId: member.branchId,
         type: 'payment',
         amount: payAmount,
         paymentDate: todayStr,
@@ -340,25 +352,27 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
     setActionLoading(true);
 
     const plan = plans.find(p => p.id === renewPlanId);
-    if (!plan) return;
+    if (!plan) {
+      setActionLoading(false);
+      return;
+    }
 
     try {
-      let rStartDate = todayStr;
-      if (renewStartDateOption === 'after_end' && latestMs) {
-        const currentEnd = new Date(latestMs.endDate);
-        currentEnd.setDate(currentEnd.getDate() + 1);
-        rStartDate = currentEnd.toISOString().split('T')[0];
-      } else if (renewStartDateOption === 'custom') {
-        rStartDate = renewCustomStartDate;
+      if (!renewStartDate || isNaN(new Date(renewStartDate).getTime())) {
+        alert('Please enter or select a valid renewal start date.');
+        setActionLoading(false);
+        return;
       }
 
+      const rStartDate = renewStartDate;
       const rEndDate = calculateMembershipEndDate(rStartDate, plan.durationValue, plan.durationUnit);
 
       const safeCustomPrice = isNaN(renewCustomPrice) ? 0 : renewCustomPrice;
       const safeJoiningFee = isNaN(renewJoiningFee) ? 0 : renewJoiningFee;
       const netPremium = Math.round((safeCustomPrice + safeJoiningFee) * 100) / 100;
+      const billingFreq: 'upfront' | 'monthly' = (plan.billingFrequency as any) || 'upfront';
       
-      const newMembershipPayload = {
+      const newMembershipPayload = cleanUndefined({
         memberId,
         branchId: member.branchId || gym.defaultBranchId || 'main-branch',
         planId: renewPlanId,
@@ -373,12 +387,12 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         discountAmount: 0,
         taxAmount: 0,
         finalAmount: netPremium,
-        billingFrequency: plan.billingFrequency,
+        billingFrequency: billingFreq,
         baseStatus: 'active' as const,
         freezePeriods: [],
         createdBy: user.uid,
         updatedBy: user.uid,
-      };
+      });
 
       const durationMonths = plan.durationUnit === 'months' ? plan.durationValue : 1;
       const duesRaw = generateDuesForMembership({
@@ -392,9 +406,9 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         joiningFee: safeJoiningFee,
         discountAmount: 0,
         taxAmount: 0,
-        billingFrequency: plan.billingFrequency,
+        billingFrequency: billingFreq,
         durationMonths,
-      });
+      }).map(cleanUndefined);
 
       await renewMembershipAtomic(gym.id, newMembershipPayload, duesRaw, user.uid, user.displayName || 'Staff');
       
@@ -402,6 +416,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
       setRenewPlanId('');
       setRenewCustomPrice(0);
       setRenewJoiningFee(0);
+      setRenewStartDate(todayStr);
     } catch (err: any) {
       alert(err.message || 'Renewal failed.');
     } finally {
@@ -775,6 +790,15 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                     setRenewCustomPrice(firstPlan.standardPrice || 0);
                     setRenewJoiningFee(firstPlan.joiningFee || 0);
                   }
+                  if (latestMs && new Date(latestMs.endDate) >= new Date(todayStr)) {
+                    const d = new Date(latestMs.endDate);
+                    d.setDate(d.getDate() + 1);
+                    setRenewStartDate(d.toISOString().split('T')[0]);
+                    setRenewStartDateOption('after_end');
+                  } else {
+                    setRenewStartDate(todayStr);
+                    setRenewStartDateOption('immediate');
+                  }
                   setShowRenewModal(true);
                 }}
                 className="w-full bg-primary hover:bg-primary-dark text-white font-semibold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-md"
@@ -1093,9 +1117,10 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
       {showRenewModal && (
         <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
           <div className="bg-surface border border-border-dark p-6 rounded-2xl w-full max-w-md shadow-2xl">
-            <h3 className="text-sm font-bold text-text-main mb-4">Renew Gym Membership</h3>
+            <h3 className="text-base font-bold text-text-main mb-4">Renew Gym Membership</h3>
             
             <div className="space-y-4 text-xs">
+              {/* 1. Plan Selector */}
               <div>
                 <label className="block text-muted-gray mb-1 font-medium">Select Plan</label>
                 <select
@@ -1109,7 +1134,7 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                       setRenewJoiningFee(p.joiningFee || 0);
                     }
                   }}
-                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none"
+                  className="w-full bg-canvas border border-border-muted px-3 py-2.5 rounded-xl text-text-main outline-none focus:border-primary font-medium"
                 >
                   {plans.map(p => (
                     <option key={p.id} value={p.id}>{p.name} (Standard: ₹{p.standardPrice})</option>
@@ -1117,58 +1142,94 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                 </select>
               </div>
 
+              {/* 2. Manual Rupees Input */}
               <div>
                 <label className="block text-muted-gray mb-1 font-medium">Renewal Amount / Fee (₹)</label>
-                <input
-                  type="number"
-                  value={renewCustomPrice}
-                  onChange={e => { const v = parseFloat(e.target.value); setRenewCustomPrice(isNaN(v) ? 0 : v); }}
-                  placeholder="0"
-                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
-                />
-                <span className="text-[10px] text-muted-gray mt-0.5 block">You can manually edit/override the renewal price above.</span>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-gray font-bold text-sm">₹</span>
+                  <input
+                    type="number"
+                    value={renewCustomPrice}
+                    onChange={e => {
+                      const v = parseFloat(e.target.value);
+                      setRenewCustomPrice(isNaN(v) ? 0 : v);
+                    }}
+                    placeholder="Enter amount in ₹"
+                    className="w-full bg-canvas border border-border-muted pl-8 pr-3 py-2.5 rounded-xl text-text-main font-bold text-sm outline-none focus:border-primary"
+                  />
+                </div>
+                <span className="text-[10px] text-muted-gray mt-1 block">Manually enter or adjust the renewal rupees above.</span>
               </div>
 
-              <div>
-                <label className="block text-muted-gray mb-1 font-medium">Joining Fee (₹)</label>
-                <input
-                  type="number"
-                  value={renewJoiningFee}
-                  onChange={e => { const v = parseFloat(e.target.value); setRenewJoiningFee(isNaN(v) ? 0 : v); }}
-                  placeholder="0"
-                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
-                />
-              </div>
-
-              <div>
-                <label className="block text-muted-gray mb-1 font-medium">Start Date Option</label>
-                <select
-                  value={renewStartDateOption}
-                  onChange={e => setRenewStartDateOption(e.target.value as any)}
-                  className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none"
-                >
-                  <option value="immediate">Start Immediately (Today)</option>
-                  {latestMs && (
-                    <option value="after_end">Start Day After Current Expiration ({latestMs.endDate})</option>
-                  )}
-                  <option value="custom">Custom Date</option>
-                </select>
-                {renewStartDateOption === 'custom' && (
-                  <div className="mt-2">
-                    <label className="block text-muted-gray mb-1 font-medium text-[10px]">Select Date</label>
+              {/* Optional Joining Fee if present */}
+              {renewJoiningFee > 0 && (
+                <div>
+                  <label className="block text-muted-gray mb-1 font-medium">Joining Fee (₹)</label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-gray font-bold text-sm">₹</span>
                     <input
-                      type="date"
-                      value={renewCustomStartDate}
-                      onChange={e => setRenewCustomStartDate(e.target.value)}
-                      className="w-full bg-canvas border border-border-muted px-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
+                      type="number"
+                      value={renewJoiningFee}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value);
+                        setRenewJoiningFee(isNaN(v) ? 0 : v);
+                      }}
+                      className="w-full bg-canvas border border-border-muted pl-8 pr-3 py-2 rounded-xl text-text-main outline-none focus:border-primary"
                     />
                   </div>
-                )}
+                </div>
+              )}
+
+              {/* 3. Manual Start Date Input */}
+              <div>
+                <label className="block text-muted-gray mb-1 font-medium">Start Membership From (Date)</label>
+                <input
+                  type="date"
+                  value={renewStartDate}
+                  onChange={e => setRenewStartDate(e.target.value)}
+                  className="w-full bg-canvas border border-border-muted px-3 py-2.5 rounded-xl text-text-main outline-none focus:border-primary font-medium"
+                />
+                <span className="text-[10px] text-muted-gray mt-1 block">Pick or type the exact date to start this renewal from.</span>
+                
+                {/* Quick Date Presets */}
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRenewStartDate(todayStr);
+                      setRenewStartDateOption('immediate');
+                    }}
+                    className={`text-[10px] px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                      renewStartDate === todayStr ? 'bg-primary/20 border-primary text-primary font-bold' : 'border-border-muted text-muted-gray hover:text-text-main'
+                    }`}
+                  >
+                    Start Today ({todayStr})
+                  </button>
+                  {latestMs && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const d = new Date(latestMs.endDate);
+                        d.setDate(d.getDate() + 1);
+                        setRenewStartDate(d.toISOString().split('T')[0]);
+                        setRenewStartDateOption('after_end');
+                      }}
+                      className={`text-[10px] px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
+                        renewStartDateOption === 'after_end' ? 'bg-primary/20 border-primary text-primary font-bold' : 'border-border-muted text-muted-gray hover:text-text-main'
+                      }`}
+                    >
+                      Day After Expiration ({latestMs.endDate})
+                    </button>
+                  )}
+                </div>
               </div>
 
+              {/* Live Total Calculation */}
               <div className="bg-canvas border border-border-muted p-3 rounded-xl flex justify-between items-center text-xs font-semibold text-text-main">
                 <span>Total Renewal Fee:</span>
-                <span className="text-primary font-bold text-sm">₹{Math.round(((isNaN(renewCustomPrice) ? 0 : renewCustomPrice) + (isNaN(renewJoiningFee) ? 0 : renewJoiningFee)) * 100) / 100}</span>
+                <span className="text-primary font-extrabold text-base">
+                  ₹{Math.round(((isNaN(renewCustomPrice) ? 0 : renewCustomPrice) + (isNaN(renewJoiningFee) ? 0 : renewJoiningFee)) * 100) / 100}
+                </span>
               </div>
             </div>
 
@@ -1176,15 +1237,15 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
               <button
                 type="button"
                 onClick={() => setShowRenewModal(false)}
-                className="bg-canvas border border-border-muted px-3 py-2 rounded-xl text-xs font-semibold text-text-main cursor-pointer"
+                className="bg-canvas border border-border-muted px-4 py-2 rounded-xl text-xs font-semibold text-text-main hover:bg-surface-light transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={handleRenewMembership}
-                disabled={actionLoading || !renewPlanId}
-                className="bg-primary hover:bg-primary-dark text-white font-bold px-4 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer"
+                disabled={actionLoading || !renewPlanId || !renewStartDate}
+                className="bg-primary hover:bg-primary-dark text-white font-bold px-5 py-2 rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md disabled:opacity-50"
               >
                 {actionLoading ? 'Renewing...' : 'Confirm Renewal'}
               </button>

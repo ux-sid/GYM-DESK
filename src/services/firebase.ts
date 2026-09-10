@@ -3,7 +3,6 @@ import {
   getAuth, 
   GoogleAuthProvider, 
   signInWithPopup, 
-  signInWithRedirect,
   signOut
 } from 'firebase/auth';
 import type { User } from 'firebase/auth';
@@ -11,8 +10,10 @@ import {
   initializeFirestore, 
   persistentLocalCache, 
   persistentMultipleTabManager,
+  memoryLocalCache,
   connectFirestoreEmulator,
   disableNetwork,
+  enableNetwork,
   doc,
   collection,
   getDoc,
@@ -38,19 +39,23 @@ const firebaseConfig = {
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-// Check if device is in local offline-only bypass mode
+// Check if device is trusted or we are running in local offline-only bypass mode
 const isOfflineMode = localStorage.getItem('gymdesk_offline_mode') === 'true';
+const isTrustedDevice = localStorage.getItem('gymdesk_trusted_device') === 'true' || isOfflineMode;
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Always use persistent local cache so returning users get their data
-// immediately from IndexedDB without waiting for network queries
-export const db = initializeFirestore(app, {
-  localCache: persistentLocalCache({
-    tabManager: persistentMultipleTabManager(),
-  }),
-});
+// Initialize Firestore with cache settings
+export const db = isTrustedDevice
+  ? initializeFirestore(app, {
+      localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+      }),
+    })
+  : initializeFirestore(app, {
+      localCache: memoryLocalCache(),
+    });
 
 export const auth = getAuth(app);
 export const storage = getStorage(app);
@@ -74,11 +79,11 @@ if (isOfflineMode) {
   }
 }
 
-function cleanUndefined(obj: any): any {
+export function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
-  if (obj instanceof Date) {
+  if (obj.constructor && obj.constructor.name !== 'Object' && !Array.isArray(obj)) {
     return obj;
   }
   if (Array.isArray(obj)) {
@@ -155,76 +160,23 @@ export async function runLocalOrOnlineTransaction<T>(
     });
     return result;
   } else {
-    try {
-      return await runTransaction(firestoreDb, updateFunction);
-    } catch (err: any) {
-      // If server rejects transaction (e.g. security rules or offline glitch),
-      // retry with local cache batch so operations never get stuck
-      console.warn('[Transaction] Online transaction failed, falling back to local batch:', err);
-      const pendingWrites: any[] = [];
-      const mockTransaction = {
-        get: async (docRef: any) => {
-          try {
-            return await getDoc(docRef);
-          } catch {
-            return {
-              exists: () => false,
-              data: () => undefined,
-              id: docRef.id,
-              ref: docRef
-            } as any;
-          }
-        },
-        set: (docRef: any, data: any, options?: any) => {
-          pendingWrites.push({ type: 'set', ref: docRef, data: cleanUndefined(data), options });
-          return mockTransaction;
-        },
-        update: (docRef: any, data: any) => {
-          pendingWrites.push({ type: 'update', ref: docRef, data: cleanUndefined(data) });
-          return mockTransaction;
-        },
-        delete: (docRef: any) => {
-          pendingWrites.push({ type: 'delete', ref: docRef });
-          return mockTransaction;
-        }
-      };
-
-      const result = await updateFunction(mockTransaction);
-      const batch = writeBatch(firestoreDb);
-      for (const write of pendingWrites) {
-        if (write.type === 'set') {
-          batch.set(write.ref, write.data, write.options);
-        } else if (write.type === 'update') {
-          batch.update(write.ref, write.data);
-        } else if (write.type === 'delete') {
-          batch.delete(write.ref);
-        }
-      }
-      batch.commit().catch(e => console.warn('Local fallback batch error:', e));
-      return result;
-    }
+    return runTransaction(firestoreDb, updateFunction);
   }
 }
 
 const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-export const signInWithGoogleRedirect = async () => {
-  return await signInWithRedirect(auth, googleProvider);
-};
-
-export const signInWithGoogle = async (preferRedirect?: boolean) => {
-  if (preferRedirect) {
-    return await signInWithRedirect(auth, googleProvider);
-  }
+export const signInWithGoogle = async (_isMobile: boolean) => {
+  localStorage.removeItem('gymdesk_offline_mode');
+  localStorage.removeItem('gymdesk_mock_user');
   try {
-    await signInWithPopup(auth, googleProvider);
-  } catch (err: any) {
-    console.warn('[Auth] Popup sign-in error, falling back to full-window redirect:', err);
-    // On any popup failure (Error 500 from Google popup, popup blocked, closed by user, cross-origin isolation):
-    // Fall back to top-level redirect flow which avoids popup cookie issues
-    await signInWithRedirect(auth, googleProvider);
+    await enableNetwork(db);
+  } catch {
+    // Network may already be enabled
   }
+  // Use signInWithPopup exclusively. signInWithRedirect is known to break on mobile browsers
+  // due to ITP (Intelligent Tracking Prevention) blocking cross-site auth state persistence.
+  await signInWithPopup(auth, googleProvider);
 };
 
 export const logoutUser = () => signOut(auth);
@@ -232,14 +184,8 @@ export const logoutUser = () => signOut(auth);
 // --- DB Service Layer ---
 
 // Gym setup & details
-export async function createGymWorkspace(
-  ownerUid: string, 
-  ownerEmail: string, 
-  ownerName: string, 
-  gymData: Omit<Gym, 'id' | 'createdBy' | 'createdAt' | 'updatedAt'>,
-  customGymId?: string
-) {
-  const gymId = customGymId || doc(collection(db, 'gyms')).id;
+export async function createGymWorkspace(ownerUid: string, ownerEmail: string, ownerName: string, gymData: Omit<Gym, 'id' | 'createdBy' | 'createdAt' | 'updatedAt'>) {
+  const gymId = doc(collection(db, 'gyms')).id;
   const gymRef = doc(db, 'gyms', gymId);
   const staffRef = doc(db, 'gyms', gymId, 'staff', ownerUid);
   const userRef = doc(db, 'users', ownerUid);
@@ -271,21 +217,9 @@ export async function createGymWorkspace(
       email: ownerEmail,
       fullName: ownerName,
       lastGymId: gymId,
-      gyms: {
-        [gymId]: {
-          role: 'owner',
-          name: gymData.name
-        }
-      },
       updatedAt: timestamp
     }, { merge: true });
   });
-
-  try {
-    localStorage.setItem('gymdesk_last_gym_id', gymId);
-  } catch (e) {
-    // Ignore storage errors
-  }
 
   return gymId;
 }
@@ -464,36 +398,17 @@ export async function addMemberCompleteAtomic(
   const auditRef = doc(collection(db, 'gyms', gymId, 'auditLogs'));
 
   const result = await runLocalOrOnlineTransaction(db, async (transaction) => {
-    // 1. ALL READS FIRST (Firestore rule: all reads must happen before any writes)
+    // 1. Generate Member Code
     const counterSnap = await transaction.get(counterRef);
-    let rCounterSnap: any = null;
-    if (paymentData && paymentRef) {
-      rCounterSnap = await transaction.get(receiptCounterRef);
-    }
-
-    // 2. CALCULATE VALUES
     let nextNum = 1;
     if (counterSnap.exists()) {
       nextNum = (counterSnap.data().current || 0) + 1;
     }
+    transaction.set(counterRef, { current: nextNum }, { merge: true });
 
     const currentYear = new Date().getFullYear();
     const formattedCode = `GYM-${currentYear}-${String(nextNum).padStart(4, '0')}`;
 
-    let receiptNumber = '';
-    let rNextNum = 1;
-    if (paymentData && paymentRef) {
-      if (rCounterSnap && rCounterSnap.exists()) {
-        rNextNum = (rCounterSnap.data().current || 0) + 1;
-      }
-      receiptNumber = `RCPT-${currentYear}-${String(rNextNum).padStart(6, '0')}`;
-    }
-
-    // 3. ALL WRITES AFTER
-    // a. Update member counter
-    transaction.set(counterRef, { current: nextNum }, { merge: true });
-
-    // b. Set Member
     const newMember: Member = {
       ...memberData,
       id: memberId,
@@ -504,7 +419,7 @@ export async function addMemberCompleteAtomic(
     };
     transaction.set(memberRef, newMember);
 
-    // c. Set Membership
+    // 2. Generate Membership
     const finalMembership: Membership = {
       ...membershipData,
       id: membershipId,
@@ -514,7 +429,7 @@ export async function addMemberCompleteAtomic(
     };
     transaction.set(membershipRef, finalMembership);
 
-    // d. Set Dues
+    // 3. Generate Dues
     const duesList: Due[] = [];
     for (let i = 0; i < duesRaw.length; i++) {
       const dueId = `${membershipId}_due_${i}`;
@@ -532,9 +447,15 @@ export async function addMemberCompleteAtomic(
       duesList.push(finalDue);
     }
 
-    // e. Set Payment if provided
+    // 4. Record Payment if provided
     if (paymentData && paymentRef) {
+      const rCounterSnap = await transaction.get(receiptCounterRef);
+      let rNextNum = 1;
+      if (rCounterSnap.exists()) {
+        rNextNum = (rCounterSnap.data().current || 0) + 1;
+      }
       transaction.set(receiptCounterRef, { current: rNextNum }, { merge: true });
+      const receiptNumber = `RCPT-${currentYear}-${String(rNextNum).padStart(6, '0')}`;
 
       const { allocations, updatedDues } = allocatePayment(paymentData.amount, duesList);
 
@@ -810,7 +731,7 @@ export async function renewMembershipAtomic(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
-    transaction.set(membershipRef, finalMembership);
+    transaction.set(membershipRef, cleanUndefined(finalMembership));
 
     // Write generated dues
     for (let i = 0; i < dueRecords.length; i++) {
@@ -818,13 +739,13 @@ export async function renewMembershipAtomic(
       const dueId = `${membershipId}_due_${i}`;
       const dueRef = doc(db, 'gyms', gymId, 'dues', dueId);
       
-      transaction.set(dueRef, {
+      transaction.set(dueRef, cleanUndefined({
         ...dRec,
         id: dueId,
         membershipId, // bind correct membership id
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      }));
     }
 
     // Audit log
@@ -837,7 +758,7 @@ export async function renewMembershipAtomic(
       safeAfterSummary: `Renewed membership with plan ${membershipData.planNameSnapshot}`,
       timestamp: serverTimestamp(),
     };
-    transaction.set(auditRef, log);
+    transaction.set(auditRef, cleanUndefined(log));
   });
 }
 
@@ -936,35 +857,22 @@ import { uploadBytes, getDownloadURL } from 'firebase/storage';
 
 export async function uploadMemberPhoto(gymId: string, memberId: string | 'temp', file: Blob): Promise<string> {
   const isOffline = localStorage.getItem('gymdesk_offline_mode') === 'true';
-  const getBase64 = (): Promise<string> => new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result as string);
-    reader.readAsDataURL(file);
-  });
-
   if (isOffline) {
-    return getBase64();
+    // In offline testing mode, fallback to base64 to avoid storage emulator requirements
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.readAsDataURL(file);
+    });
   }
   
-  try {
-    const mimeType = file.type && file.type.startsWith('image/') ? file.type : 'image/jpeg';
-    const ext = mimeType.split('/')[1] || 'jpeg';
-    const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
-    const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
-    const storageRef = ref(storage, path);
-    
-    const storagePromise = (async () => {
-      await uploadBytes(storageRef, file, { contentType: mimeType });
-      return await getDownloadURL(storageRef);
-    })();
-
-    const timeoutPromise = new Promise<string>((_, reject) =>
-      setTimeout(() => reject(new Error('Storage upload timeout')), 4000)
-    );
-
-    return await Promise.race([storagePromise, timeoutPromise]);
-  } catch (err) {
-    console.warn('Firebase Storage upload failed or timed out. Falling back to Base64 image URL:', err);
-    return getBase64();
-  }
+  const ext = file.type.split('/')[1] || 'jpeg';
+  // If memberId is temp (during creation), use a random UUID
+  const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
+  const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
+  const storageRef = ref(storage, path);
+  
+  await uploadBytes(storageRef, file);
+  const downloadUrl = await getDownloadURL(storageRef);
+  return downloadUrl;
 }

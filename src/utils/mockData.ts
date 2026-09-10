@@ -11,9 +11,8 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
   // 1. Create Demo Plans
   const plans = [
     { id: 'plan_1', name: 'General Monthly', price: 1000, durationInMonths: 1, durationInDays: 30, type: 'general' },
-    { id: 'plan_2', name: '3 month (Standard: 3000)', price: 3000, durationInMonths: 3, durationInDays: 90, type: 'general' },
-    { id: 'plan_3', name: 'Quarterly Special', price: 2500, durationInMonths: 3, durationInDays: 90, type: 'general' },
-    { id: 'plan_4', name: 'Annual Elite', price: 8000, durationInMonths: 12, durationInDays: 365, type: 'general' },
+    { id: 'plan_2', name: 'Quarterly Special', price: 2500, durationInMonths: 3, durationInDays: 90, type: 'general' },
+    { id: 'plan_3', name: 'Annual Elite', price: 8000, durationInMonths: 12, durationInDays: 365, type: 'general' },
   ];
 
   plans.forEach(plan => {
@@ -39,7 +38,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '9876543210',
       gender: 'male',
       joinDate: todayStr,
-      recordStatus: 'current',
+      recordStatus: 'active',
       version: 1,
       plan: plans[0] // 30 days
     },
@@ -50,7 +49,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '8765432109',
       gender: 'male',
       joinDate: extendEndDateByDays(todayStr, -15),
-      recordStatus: 'current',
+      recordStatus: 'active',
       version: 1,
       plan: plans[1] // 90 days
     },
@@ -61,7 +60,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '7654321098',
       gender: 'male',
       joinDate: extendEndDateByDays(todayStr, -60),
-      recordStatus: 'current',
+      recordStatus: 'active',
       version: 1,
       plan: plans[0] // 30 days (expired)
     },
@@ -72,7 +71,7 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
       phone: '6543210987',
       gender: 'female',
       joinDate: extendEndDateByDays(todayStr, -5),
-      recordStatus: 'current',
+      recordStatus: 'active',
       version: 1,
       plan: plans[2] // 365 days
     },
@@ -203,11 +202,5 @@ export async function seedDemoData(gymId: string, actorUid: string, actorName: s
   const counterRef = doc(db, 'gyms', gymId, 'counters', 'members');
   batch.set(counterRef, { current: members.length }, { merge: true });
 
-  try {
-    await batch.commit();
-    console.log('[MockData] Successfully seeded demo data to', gymId);
-  } catch (err) {
-    console.warn('[MockData] batch.commit failed, fallback to local cache:', err);
-  }
+  await batch.commit();
 }
-
