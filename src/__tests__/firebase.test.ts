@@ -4,11 +4,47 @@
 import { describe, it, expect, vi } from 'vitest';
 import { addMemberCompleteAtomic } from '../services/firebase';
 
+vi.mock('firebase/app', () => ({
+  initializeApp: vi.fn(() => ({})),
+}));
+
+vi.mock('firebase/auth', () => ({
+  getAuth: vi.fn(() => ({})),
+  GoogleAuthProvider: vi.fn(),
+  signInWithPopup: vi.fn(),
+  signOut: vi.fn(),
+  connectAuthEmulator: vi.fn(),
+}));
+
+vi.mock('firebase/storage', () => ({
+  getStorage: vi.fn(() => ({})),
+  connectStorageEmulator: vi.fn(),
+  ref: vi.fn(() => ({})),
+  deleteObject: vi.fn(),
+  uploadBytes: vi.fn(),
+  getDownloadURL: vi.fn(),
+}));
+
 // Mock Firebase
 vi.mock('firebase/firestore', async () => {
   return {
+    initializeFirestore: vi.fn(() => ({})),
+    persistentLocalCache: vi.fn(),
+    persistentMultipleTabManager: vi.fn(),
+    memoryLocalCache: vi.fn(),
+    connectFirestoreEmulator: vi.fn(),
+    disableNetwork: vi.fn(),
+    enableNetwork: vi.fn(),
     doc: vi.fn(() => ({ id: 'mocked-id-' + Math.random().toString(36).substr(2, 9) })),
     collection: vi.fn(),
+    runTransaction: vi.fn(async (_db, cb) => {
+      const transactionMock = {
+        get: vi.fn().mockResolvedValue({ exists: () => true, data: () => ({ current: 10 }) }),
+        set: vi.fn(),
+        update: vi.fn(),
+      };
+      return await cb(transactionMock);
+    }),
     serverTimestamp: vi.fn(() => new Date()),
   };
 });

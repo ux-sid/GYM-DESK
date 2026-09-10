@@ -74,8 +74,9 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
   const [editEmergencyName, setEditEmergencyName] = useState('');
   const [editEmergencyPhone, setEditEmergencyPhone] = useState('');
   const [editNotes, setEditNotes] = useState('');
-  const [editPhotoFile, setEditPhotoFile] = useState<File | null>(null);
+  const [editPhotoFile, setEditPhotoFile] = useState<File | Blob | null>(null);
   const [editPhotoPreview, setEditPhotoPreview] = useState<string | null>(null);
+  const [editPhotoRemoved, setEditPhotoRemoved] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
 
@@ -242,53 +243,79 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
     setEditNotes(member!.notes || '');
     setEditPhotoFile(null);
     setEditPhotoPreview(null);
+    setEditPhotoRemoved(false);
     setEditError(null);
     setShowEditModal(true);
   };
 
   const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setEditError(null);
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      if (!file.type.startsWith('image/')) {
+        setEditError('Selected file must be an image.');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setEditError('Image size cannot exceed 5MB.');
+        return;
+      }
       try {
         const compressed = await imageCompression(file, {
           maxSizeMB: 0.1,
-          maxWidthOrHeight: 512,
+          maxWidthOrHeight: 400,
           useWebWorker: true,
         });
         setEditPhotoFile(compressed);
         setEditPhotoPreview(URL.createObjectURL(compressed));
+        setEditPhotoRemoved(false);
       } catch (err) {
-        console.error('Compression error:', err);
+        console.warn('Compression error, falling back to original file:', err);
+        setEditPhotoFile(file);
+        setEditPhotoPreview(URL.createObjectURL(file));
+        setEditPhotoRemoved(false);
       }
     }
   };
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!gym || !user) return;
+    if (!gym || !user || !member) return;
     setEditSaving(true);
     setEditError(null);
 
+    // Timeout guard so the UI can never hang in endless Saving state
+    const saveTimer = setTimeout(() => {
+      setEditSaving(false);
+      setEditError('Save operation timed out. Please try again.');
+    }, 12000);
+
     try {
-      let newPhotoPath = member!.photoStoragePath;
-      if (editPhotoFile) {
-        const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
-        if (photoPath) {
-          newPhotoPath = photoPath;
+      let newPhotoPath: string | null = member.photoStoragePath || null;
+      if (editPhotoRemoved) {
+        newPhotoPath = null;
+      } else if (editPhotoFile) {
+        try {
+          const photoPath = await uploadMemberPhoto(gym.id, member.id, editPhotoFile);
+          if (photoPath) {
+            newPhotoPath = photoPath;
+          }
+        } catch (photoErr) {
+          console.warn('Photo upload warning:', photoErr);
         }
       }
 
       const updatedData = cleanUndefined({
-        fullName: editFullName,
+        fullName: editFullName.trim(),
         searchName: editFullName.trim().toLowerCase(),
-        phone: editPhone,
-        alternatePhone: editAlternatePhone || undefined,
-        email: editEmail || undefined,
+        phone: editPhone.trim(),
+        alternatePhone: editAlternatePhone?.trim() || undefined,
+        email: editEmail?.trim() || undefined,
         dateOfBirth: editDob || undefined,
         gender: editGender,
-        addressLine1: editAddress || undefined,
-        emergencyContactName: editEmergencyName || undefined,
-        emergencyContactPhone: editEmergencyPhone || undefined,
+        addressLine1: editAddress?.trim() || undefined,
+        emergencyContactName: editEmergencyName?.trim() || undefined,
+        emergencyContactPhone: editEmergencyPhone?.trim() || undefined,
         notes: editNotes.trim() || undefined,
         photoStoragePath: newPhotoPath,
         updatedBy: user.uid,
@@ -302,11 +329,14 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
         user.uid,
         user.displayName || 'Owner'
       );
+      clearTimeout(saveTimer);
       setShowEditModal(false);
     } catch (err: any) {
-      console.error(err);
+      clearTimeout(saveTimer);
+      console.error('handleSaveEdit error:', err);
       setEditError(err.message || 'Failed to update member.');
     } finally {
+      clearTimeout(saveTimer);
       setEditSaving(false);
     }
   };
@@ -1496,15 +1526,34 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({ memberId, onBack }
                 <div className="w-20 h-20 rounded-2xl bg-canvas border border-border-muted flex items-center justify-center overflow-hidden">
                   {editPhotoPreview ? (
                     <img src={editPhotoPreview} alt="Preview" className="w-full h-full object-cover" />
-                  ) : (
+                  ) : !editPhotoRemoved && member.photoStoragePath ? (
                     <MemberPhoto path={member.photoStoragePath} fallbackLetter={member.fullName.charAt(0)} className="w-full h-full object-cover" />
+                  ) : (
+                    <div className="w-full h-full bg-primary/10 flex items-center justify-center font-bold text-primary text-xl">
+                      {member.fullName.charAt(0).toUpperCase()}
+                    </div>
                   )}
                 </div>
-                <label className="cursor-pointer bg-surface-light border border-border-muted hover:border-primary text-text-main px-3 py-1.5 rounded-lg text-[10px] font-semibold flex items-center gap-1.5 transition-colors">
-                  <Upload className="w-3 h-3" />
-                  Upload New Photo
-                  <input type="file" accept="image/*" onChange={handlePhotoSelect} className="hidden" />
-                </label>
+                <div className="flex items-center gap-2">
+                  <label className="cursor-pointer bg-surface-light border border-border-muted hover:border-primary text-text-main px-3 py-1.5 rounded-lg text-[10px] font-semibold flex items-center gap-1.5 transition-colors">
+                    <Upload className="w-3 h-3" />
+                    {editPhotoPreview || (!editPhotoRemoved && member.photoStoragePath) ? 'Change Photo' : 'Upload Photo'}
+                    <input type="file" accept="image/*" onChange={handlePhotoSelect} className="hidden" />
+                  </label>
+                  {(editPhotoPreview || (!editPhotoRemoved && member.photoStoragePath)) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditPhotoFile(null);
+                        setEditPhotoPreview(null);
+                        setEditPhotoRemoved(true);
+                      }}
+                      className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-colors cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div>

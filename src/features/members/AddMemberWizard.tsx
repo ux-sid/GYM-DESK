@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { db, addMemberCompleteAtomic, uploadMemberPhoto } from '../../services/firebase';
 import type { Plan } from '../../types';
 import { getKolkataTodayString, calculateMembershipEndDate } from '../../utils/dateUtils';
@@ -210,6 +210,15 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     setCameraActive(false);
   };
 
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
+
   const capturePhoto = () => {
     if (!videoRef.current) return;
     const canvas = document.createElement('canvas');
@@ -300,13 +309,23 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
       const safeJoiningFee = isNaN(joiningFee) ? 0 : joiningFee;
       const safeDiscountValue = isNaN(discountValue) ? 0 : discountValue;
 
-      // 1. Build Member object (photo will be saved in background to ensure instant save)
+      // 1. Process and resolve photo upfront if provided
+      let resolvedPhotoPath: string | undefined = undefined;
+      if (photoBlob) {
+        try {
+          resolvedPhotoPath = await uploadMemberPhoto(gym.id, 'temp', photoBlob);
+        } catch (photoErr) {
+          console.warn('Photo processing warning:', photoErr);
+        }
+      }
+
+      // 2. Build Member object with photoStoragePath included
       const normPhone = normalizePhone(phone);
       const memberPayload = {
         branchId: gym.defaultBranchId || 'main-branch',
         fullName,
         searchName: fullName.trim().toLowerCase(),
-        photoStoragePath: undefined,
+        photoStoragePath: resolvedPhotoPath || undefined,
         phone,
         phoneNormalised: normPhone,
         alternatePhone: alternatePhone || undefined,
@@ -372,7 +391,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         durationMonths,
       });
 
-      // 2. Run atomic transaction with timeout protection
+      // 3. Run atomic transaction with timeout protection
       const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
@@ -399,18 +418,6 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
       const savedMemberId = await Promise.race([savePromise, txnTimeout]);
       clearTimeout(masterTimeout);
-
-      // 3. Upload photo asynchronously in background without blocking UI
-      if (photoBlob) {
-        uploadMemberPhoto(gym.id, savedMemberId, photoBlob)
-          .then(async (photoUrl) => {
-            if (photoUrl) {
-              const memberDocRef = doc(db, 'gyms', gym.id, 'members', savedMemberId);
-              await updateDoc(memberDocRef, { photoStoragePath: photoUrl });
-            }
-          })
-          .catch(err => console.error('Background photo upload error:', err));
-      }
 
       onSuccess(savedMemberId);
     } catch (err: any) {

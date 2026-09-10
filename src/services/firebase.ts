@@ -537,11 +537,13 @@ export async function updateMemberSafe(
     if (!snap.exists()) throw new Error('Member not found');
     const current = snap.data() as Member;
 
-    if (current.version !== expectedVersion) {
+    const currentVersion = current.version || 1;
+    const targetExpectedVersion = expectedVersion || 1;
+    if (currentVersion !== targetExpectedVersion) {
       throw new Error(`VERSION_CONFLICT|${JSON.stringify(current)}`);
     }
 
-    const nextVersion = expectedVersion + 1;
+    const nextVersion = targetExpectedVersion + 1;
     transaction.update(memberRef, {
       ...updatedData,
       version: nextVersion,
@@ -850,7 +852,7 @@ export async function permanentlyDeleteMember(gymId: string, memberId: string, a
   const memberSnap = await getDoc(memberRef);
   if (memberSnap.exists()) {
     const member = memberSnap.data() as Member;
-    if (member.photoStoragePath) {
+    if (member.photoStoragePath && !member.photoStoragePath.startsWith('data:') && !member.photoStoragePath.startsWith('blob:')) {
       try {
         const photoRef = ref(storage, member.photoStoragePath);
         await deleteObject(photoRef);
@@ -873,27 +875,141 @@ export async function permanentlyDeleteMember(gymId: string, memberId: string, a
   await batch.commit();
 }
 
+// Convert Blob to optimized compact Data URL (<30KB)
+export async function blobToDataUrl(blob: Blob, maxDim = 400, quality = 0.8): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      let settled = false;
+      let url = '';
+      try {
+        url = URL.createObjectURL(blob);
+      } catch {
+        // Fallback to FileReader immediately if createObjectURL is unavailable
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+        return;
+      }
+
+      const img = new Image();
+      const cleanup = () => {
+        if (url) {
+          try { URL.revokeObjectURL(url); } catch {}
+        }
+      };
+
+      const fallbackTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        }
+      }, 500);
+
+      img.onload = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+        cleanup();
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        try {
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(dataUrl);
+        } catch {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        }
+      };
+
+      img.onerror = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+        cleanup();
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      };
+
+      img.src = url;
+    } else {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    }
+  });
+}
+
 // Upload Member Photo
 import { uploadBytes, getDownloadURL } from 'firebase/storage';
 
-export async function uploadMemberPhoto(gymId: string, memberId: string | 'temp', file: Blob): Promise<string> {
+export async function uploadMemberPhoto(
+  gymId: string, 
+  memberId: string | 'temp', 
+  file: Blob | string
+): Promise<string> {
+  if (typeof file === 'string') {
+    return file;
+  }
+
+  // 1. Generate optimized compact data URL (< 30KB)
+  const dataUrl = await blobToDataUrl(file, 400, 0.8);
+
   const isOffline = localStorage.getItem('gymdesk_offline_mode') === 'true';
   if (isOffline) {
-    // In offline testing mode, fallback to base64 to avoid storage emulator requirements
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.readAsDataURL(file);
-    });
+    return dataUrl;
   }
-  
-  const ext = file.type.split('/')[1] || 'jpeg';
-  // If memberId is temp (during creation), use a random UUID
-  const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
-  const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
-  const storageRef = ref(storage, path);
-  
-  await uploadBytes(storageRef, file);
-  const downloadUrl = await getDownloadURL(storageRef);
-  return downloadUrl;
+
+  // 2. Attempt Firebase Storage upload with a strict 2.5s race timeout
+  try {
+    const ext = file.type?.split('/')[1] || 'jpeg';
+    const finalId = memberId === 'temp' ? Math.random().toString(36).substring(2, 15) : memberId;
+    const path = `gyms/${gymId}/members/${finalId}/profile.${ext}`;
+    const storageRef = ref(storage, path);
+
+    const uploadPromise = (async () => {
+      await uploadBytes(storageRef, file);
+      return await getDownloadURL(storageRef);
+    })();
+
+    const timeoutPromise = new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error('Firebase Storage timeout')), 2500)
+    );
+
+    const downloadUrl = await Promise.race([uploadPromise, timeoutPromise]);
+    return downloadUrl;
+  } catch (err) {
+    // Graceful fallback to optimized data URL: never hangs, never fails photo save
+    console.warn('Firebase Storage upload unavailable or timed out, using optimized inline photo fallback:', err);
+    return dataUrl;
+  }
 }
