@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../auth/AuthContext';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, updateDoc } from 'firebase/firestore';
 import { db, addMemberCompleteAtomic, uploadMemberPhoto } from '../../services/firebase';
 import type { Plan } from '../../types';
 import { getKolkataTodayString, calculateMembershipEndDate } from '../../utils/dateUtils';
@@ -54,7 +54,6 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
   // Image Upload State
   const [photoBlob, setPhotoBlob] = useState<Blob | null>(null);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
 
   const [cameraActive, setCameraActive] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
@@ -291,22 +290,23 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
     setSaving(true);
     setSaveError(null);
 
+    const masterTimeout = setTimeout(() => {
+      setSaveError('Save operation timed out. Please check your connection and try again.');
+      setSaving(false);
+    }, 15000);
+
     try {
-      let photoPath = '';
+      const safeCustomPrice = isNaN(customPrice) ? 0 : customPrice;
+      const safeJoiningFee = isNaN(joiningFee) ? 0 : joiningFee;
+      const safeDiscountValue = isNaN(discountValue) ? 0 : discountValue;
 
-      // 1. Upload photo to Firebase Storage
-      if (photoBlob) {
-        photoPath = await uploadMemberPhoto(gym.id, 'temp', photoBlob);
-        setUploadProgress(100);
-      }
-
-      // 2. Build Member object
+      // 1. Build Member object (photo will be saved in background to ensure instant save)
       const normPhone = normalizePhone(phone);
       const memberPayload = {
         branchId: gym.defaultBranchId || 'main-branch',
         fullName,
         searchName: fullName.trim().toLowerCase(),
-        photoStoragePath: photoPath || undefined,
+        photoStoragePath: undefined,
         phone,
         phoneNormalised: normPhone,
         alternatePhone: alternatePhone || undefined,
@@ -339,13 +339,13 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         branchId: gym.defaultBranchId || 'main-branch',
         planId: selectedPlanId,
         planNameSnapshot: plan?.name || 'Custom Plan',
-        planPriceSnapshot: customPrice,
+        planPriceSnapshot: safeCustomPrice,
         startDate,
         endDate,
-        grossAmount: customPrice,
-        joiningFee,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountType,
-        discountValue,
+        discountValue: safeDiscountValue,
         discountAmount,
         taxAmount,
         finalAmount,
@@ -358,21 +358,22 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
 
       const durationMonths = plan?.durationUnit === 'months' ? plan.durationValue : 1;
       const duesRaw = generateDuesForMembership({
-        memberId: '', // overwritten in atomic func
+        memberId: '',
         membershipId: '',
         branchId: gym.defaultBranchId || 'main-branch',
         startDate,
         endDate,
         finalAmount,
-        grossAmount: customPrice,
-        joiningFee,
+        grossAmount: safeCustomPrice,
+        joiningFee: safeJoiningFee,
         discountAmount,
         taxAmount,
         billingFrequency: plan?.billingFrequency || 'upfront',
         durationMonths,
       });
 
-      const savedMemberId = await addMemberCompleteAtomic(
+      // 2. Run atomic transaction with timeout protection
+      const savePromise = addMemberCompleteAtomic(
         gym.id, 
         cleanUndefined(memberPayload),
         cleanUndefined(membershipPayload),
@@ -392,9 +393,30 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
         user.displayName || 'Owner'
       );
 
+      const txnTimeout = new Promise<string>((_, reject) => 
+        setTimeout(() => reject(new Error('Database save timed out. Please try again.')), 10000)
+      );
+
+      const savedMemberId = await Promise.race([savePromise, txnTimeout]);
+      clearTimeout(masterTimeout);
+
+      // 3. Upload photo asynchronously in background without blocking UI
+      if (photoBlob) {
+        uploadMemberPhoto(gym.id, savedMemberId, photoBlob)
+          .then(async (photoUrl) => {
+            if (photoUrl) {
+              const memberDocRef = doc(db, 'gyms', gym.id, 'members', savedMemberId);
+              await updateDoc(memberDocRef, { photoStoragePath: photoUrl });
+            }
+          })
+          .catch(err => console.error('Background photo upload error:', err));
+      }
+
       onSuccess(savedMemberId);
     } catch (err: any) {
-      setSaveError(err.message || 'An error occurred while saving the member.');
+      console.error('handleSave error:', err);
+      clearTimeout(masterTimeout);
+      setSaveError(err?.message || String(err) || 'An error occurred while saving the member.');
     } finally {
       setSaving(false);
     }
@@ -943,7 +965,7 @@ export const AddMemberWizard: React.FC<AddMemberWizardProps> = ({ onSuccess, onC
             {saving ? (
               <>
                 <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                <span>Saving... {uploadProgress > 0 ? `${uploadProgress}%` : ''}</span>
+                <span>Saving...</span>
               </>
             ) : (
               <>
