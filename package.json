@@ -14,7 +14,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "browser-image-compression": "^2.0.2",
     "date-fns": "^4.4.0",
-    "firebase": "^12.17.0",
+    "firebase": "^12.19.0",
     "html-to-image": "^1.11.13",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",

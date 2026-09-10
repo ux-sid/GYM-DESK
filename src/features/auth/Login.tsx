@@ -20,6 +20,8 @@ export const Login: React.FC = () => {
         setError('Google sign-in popup was closed. Please click below to try again.');
       } else if (err.code === 'auth/cancelled-popup-request') {
         // Ignored
+      } else if (err?.message?.includes('closing/hidden') || err?.message?.includes('Database is closing')) {
+        setError('Browser session was temporarily interrupted. Please click "Continue with Google" once more.');
       } else {
         setError(err.message || 'Failed to authenticate with Google.');
       }

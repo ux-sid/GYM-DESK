@@ -174,9 +174,17 @@ export const signInWithGoogle = async (_isMobile: boolean) => {
   } catch {
     // Network may already be enabled
   }
-  // Use signInWithPopup exclusively. signInWithRedirect is known to break on mobile browsers
-  // due to ITP (Intelligent Tracking Prevention) blocking cross-site auth state persistence.
-  await signInWithPopup(auth, googleProvider);
+  // Use signInWithPopup exclusively. Handles transient IndexedDB visibility bug: "Database is closing/hidden"
+  try {
+    return await signInWithPopup(auth, googleProvider);
+  } catch (err: any) {
+    if (err?.message?.includes('closing/hidden') || err?.message?.includes('Database is closing')) {
+      console.warn('Encountered transient IndexedDB closing/hidden error. Retrying after delay...', err);
+      await new Promise(resolve => setTimeout(resolve, 400));
+      return await signInWithPopup(auth, googleProvider);
+    }
+    throw err;
+  }
 };
 
 export const logoutUser = () => signOut(auth);
