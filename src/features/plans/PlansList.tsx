@@ -46,18 +46,41 @@ export const PlansList: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!gym) return;
-
-    const unsubPlans = onSnapshot(collection(db, 'gyms', gym.id, 'plans'), (snap) => {
-      setPlans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Plan)));
-    });
-
-    const unsubMemberships = onSnapshot(collection(db, 'gyms', gym.id, 'memberships'), (snap) => {
-      setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
+    if (!gym) {
       setLoading(false);
-    });
+      return;
+    }
+
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
+    const unsubPlans = onSnapshot(
+      collection(db, 'gyms', gym.id, 'plans'), 
+      (snap) => {
+        setPlans(snap.docs.map(d => ({ id: d.id, ...d.data() } as Plan)));
+      },
+      (err) => {
+        console.warn('PlansList plans snapshot error:', err);
+      }
+    );
+
+    const unsubMemberships = onSnapshot(
+      collection(db, 'gyms', gym.id, 'memberships'), 
+      (snap) => {
+        clearTimeout(safetyTimer);
+        setMemberships(snap.docs.map(d => ({ id: d.id, ...d.data() } as Membership)));
+        setLoading(false);
+      },
+      (err) => {
+        clearTimeout(safetyTimer);
+        console.warn('PlansList memberships snapshot error:', err);
+        setLoading(false);
+      }
+    );
 
     return () => {
+      clearTimeout(safetyTimer);
       unsubPlans();
       unsubMemberships();
     };

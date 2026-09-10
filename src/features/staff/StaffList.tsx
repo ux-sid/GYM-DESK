@@ -18,18 +18,41 @@ export const StaffList: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!gym) return;
-
-    const unsubStaff = onSnapshot(collection(db, 'gyms', gym.id, 'staff'), (snap) => {
-      setStaff(snap.docs.map(d => ({ uid: d.id, ...d.data() } as Staff)));
-    });
-
-    const unsubInvites = onSnapshot(collection(db, 'gyms', gym.id, 'invites'), (snap) => {
-      setInvites(snap.docs.map(d => ({ id: d.id, ...d.data() } as Invite)));
+    if (!gym) {
       setLoading(false);
-    });
+      return;
+    }
+
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 4000);
+
+    const unsubStaff = onSnapshot(
+      collection(db, 'gyms', gym.id, 'staff'), 
+      (snap) => {
+        setStaff(snap.docs.map(d => ({ uid: d.id, ...d.data() } as Staff)));
+      },
+      (err) => {
+        console.warn('StaffList staff snapshot error:', err);
+      }
+    );
+
+    const unsubInvites = onSnapshot(
+      collection(db, 'gyms', gym.id, 'invites'), 
+      (snap) => {
+        clearTimeout(safetyTimer);
+        setInvites(snap.docs.map(d => ({ id: d.id, ...d.data() } as Invite)));
+        setLoading(false);
+      },
+      (err) => {
+        clearTimeout(safetyTimer);
+        console.warn('StaffList invites snapshot error:', err);
+        setLoading(false);
+      }
+    );
 
     return () => {
+      clearTimeout(safetyTimer);
       unsubStaff();
       unsubInvites();
     };

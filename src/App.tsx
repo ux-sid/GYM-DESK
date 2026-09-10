@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { Login } from './features/auth/Login';
 import { FirstRunSetup } from './features/auth/FirstRunSetup';
@@ -20,11 +20,18 @@ import {
 } from 'lucide-react';
 
 const GymDeskApp: React.FC = () => {
-  const { user, gym, loading, logout, role } = useAuth();
+  const { user, gym, loading, isEmailLookupLoading, isExistingUser, isMasterAdmin: isMasterAdminUser, logout, role } = useAuth();
   
   // Navigation State
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
+
+  // If user is Master Admin and has no specific gym loaded yet, direct to superadmin portal
+  useEffect(() => {
+    if (isMasterAdminUser && !gym) {
+      setActiveTab('superadmin');
+    }
+  }, [isMasterAdminUser, gym]);
 
   // Theme State
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -47,7 +54,8 @@ const GymDeskApp: React.FC = () => {
   // Mobile menu toggle
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  if (loading) {
+  // 1. Loading state (Auth loading OR Email lookup loading)
+  if (loading || isEmailLookupLoading) {
     return (
       <div className="min-h-screen bg-canvas flex justify-center items-center">
         <div className="h-10 w-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
@@ -55,13 +63,13 @@ const GymDeskApp: React.FC = () => {
     );
   }
 
-  // 1. Unauthenticated state
+  // 2. Unauthenticated state
   if (!user) {
     return <Login />;
   }
 
-  // 2. Gym workspace setup state (First run)
-  if (!gym) {
+  // 3. New User state (ONLY when user is authenticated, email lookup completed, isExistingUser === false, and NOT master admin)
+  if (!isMasterAdminUser && !isExistingUser && !gym) {
     return <FirstRunSetup />;
   }
 
@@ -95,11 +103,19 @@ const GymDeskApp: React.FC = () => {
         <aside className="hidden md:flex md:w-64 bg-surface border-r border-border-dark flex-col justify-between shrink-0 sticky top-0 h-screen p-6">
           <div className="space-y-8">
             {/* Logo/Wordmark */}
-            <div className="flex items-center gap-3">
-              <div className="bg-primary text-white p-2 rounded-lg">
-                <Dumbbell className="h-5 w-5" />
+            <div>
+              <div className="flex items-center gap-3">
+                <div className="bg-primary text-white p-2 rounded-lg">
+                  <Dumbbell className="h-5 w-5" />
+                </div>
+                <span className="font-extrabold tracking-tight text-text-main text-lg">Gym<span className="text-primary">Desk</span></span>
               </div>
-              <span className="font-extrabold tracking-tight text-text-main text-lg">Gym<span className="text-primary">Desk</span></span>
+              {gym && (
+                <div className="mt-2 bg-surface-light px-3 py-1.5 rounded-lg border border-border-muted">
+                  <p className="text-[10px] text-muted-gray uppercase font-semibold">Active Gym</p>
+                  <p className="text-xs font-bold text-text-main truncate" title={gym.name}>{gym.name}</p>
+                </div>
+              )}
             </div>
 
             {/* Nav Tabs */}
@@ -119,7 +135,7 @@ const GymDeskApp: React.FC = () => {
               <button
                 onClick={() => handleNavigate('members')}
                 className={`flex items-center gap-3 px-4 py-2.5 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
-                  (activeTab === 'members' || selectedMemberId || isAddingMember)
+                  (activeTab === 'members' || isAddingMember)
                     ? 'bg-primary text-white font-bold shadow-md'
                     : 'text-muted-gray hover:text-text-main hover:bg-surface-light'
                 }`}
@@ -227,8 +243,8 @@ const GymDeskApp: React.FC = () => {
                 {user.displayName?.charAt(0) || 'U'}
               </div>
               <div className="overflow-hidden">
-                <p className="text-xs font-bold text-text-main truncate m-0">{user.displayName || 'Gym Owner'}</p>
-                <p className="text-[9px] text-primary uppercase font-bold tracking-wider mt-0.5">{role}</p>
+                <p className="text-xs font-bold text-text-main truncate m-0">{user.displayName || (isMasterAdminUser ? 'Master Admin' : 'Gym Owner')}</p>
+                <p className="text-[9px] text-primary uppercase font-bold tracking-wider mt-0.5">{isMasterAdminUser ? 'MASTER ADMIN' : role}</p>
                 <p className="text-[9px] text-muted-gray truncate mt-0.5" title={user.email || ''}>{user.email}</p>
               </div>
             </div>
@@ -308,10 +324,14 @@ const GymDeskApp: React.FC = () => {
           ) : (
             <>
               {activeTab === 'dashboard' && (
-                <Dashboard 
-                  onNavigate={handleNavigate}
-                  onAddMember={() => setIsAddingMember(true)}
-                />
+                gym ? (
+                  <Dashboard 
+                    onNavigate={handleNavigate}
+                    onAddMember={() => setIsAddingMember(true)}
+                  />
+                ) : (
+                  <SuperAdminDashboard onNavigate={handleNavigate} />
+                )
               )}
               {activeTab === 'members' && (
                 <MembersList 
@@ -319,12 +339,12 @@ const GymDeskApp: React.FC = () => {
                   onAddMember={() => setIsAddingMember(true)}
                 />
               )}
-              {activeTab === 'ledger' && <PaymentsDues />}
+              {activeTab === 'ledger' && <PaymentsDues onSelectMember={handleSelectMember} />}
               {activeTab === 'plans' && <PlansList />}
               {activeTab === 'reports' && <Reports />}
               {activeTab === 'staff' && <StaffList />}
               {activeTab === 'settings' && <Settings />}
-              {activeTab === 'superadmin' && user?.email && SUPER_ADMIN_EMAILS.some(e => e.toLowerCase() === user.email?.toLowerCase()) && <SuperAdminDashboard onNavigate={handleNavigate} />}
+              {activeTab === 'superadmin' && isMasterAdminUser && <SuperAdminDashboard onNavigate={handleNavigate} />}
             </>
           )}
         </main>

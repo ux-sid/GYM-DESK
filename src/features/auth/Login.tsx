@@ -3,18 +3,28 @@ import { useAuth } from './AuthContext';
 import { Dumbbell, ShieldAlert } from 'lucide-react';
 
 export const Login: React.FC = () => {
-  const { login } = useAuth();
+  const { login, authError } = useAuth();
   const [error, setError] = useState<string | null>(null);
   const [loadingGoogle, setLoadingGoogle] = useState(false);
 
   const handleLogin = async () => {
     setError(null);
     setLoadingGoogle(true);
+    const timer = setTimeout(() => {
+      setLoadingGoogle(false);
+    }, 25000);
     try {
       await login();
     } catch (err: any) {
-      setError(err.message || 'Failed to authenticate with Google.');
+      if (err.code === 'auth/popup-closed-by-user') {
+        setError('Google sign-in popup was closed. Please click below to try again.');
+      } else if (err.code === 'auth/cancelled-popup-request') {
+        // Ignored
+      } else {
+        setError(err.message || 'Failed to authenticate with Google.');
+      }
     } finally {
+      clearTimeout(timer);
       setLoadingGoogle(false);
     }
   };
@@ -39,10 +49,10 @@ export const Login: React.FC = () => {
           Sign in to access memberships, collect payments, and manage branch operations.
         </p>
 
-        {error && (
+        {(error || authError) && (
           <div className="w-full bg-red-950/30 border border-red-500/50 p-3 rounded-lg mb-6 flex gap-2 items-center text-red-200 text-sm">
             <ShieldAlert className="h-5 w-5 text-red-500 shrink-0" />
-            <span>{error}</span>
+            <span>{error || authError}</span>
           </div>
         )}
 

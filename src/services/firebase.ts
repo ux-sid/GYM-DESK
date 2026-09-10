@@ -13,6 +13,7 @@ import {
   memoryLocalCache,
   connectFirestoreEmulator,
   disableNetwork,
+  enableNetwork,
   doc,
   collection,
   getDoc,
@@ -78,8 +79,11 @@ if (isOfflineMode) {
   }
 }
 
-function cleanUndefined(obj: any): any {
+export function cleanUndefined(obj: any): any {
   if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (obj.constructor && obj.constructor.name !== 'Object' && !Array.isArray(obj)) {
     return obj;
   }
   if (Array.isArray(obj)) {
@@ -163,6 +167,13 @@ export async function runLocalOrOnlineTransaction<T>(
 const googleProvider = new GoogleAuthProvider();
 
 export const signInWithGoogle = async (_isMobile: boolean) => {
+  localStorage.removeItem('gymdesk_offline_mode');
+  localStorage.removeItem('gymdesk_mock_user');
+  try {
+    await enableNetwork(db);
+  } catch {
+    // Network may already be enabled
+  }
   // Use signInWithPopup exclusively. signInWithRedirect is known to break on mobile browsers
   // due to ITP (Intelligent Tracking Prevention) blocking cross-site auth state persistence.
   await signInWithPopup(auth, googleProvider);
@@ -720,7 +731,7 @@ export async function renewMembershipAtomic(
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
-    transaction.set(membershipRef, finalMembership);
+    transaction.set(membershipRef, cleanUndefined(finalMembership));
 
     // Write generated dues
     for (let i = 0; i < dueRecords.length; i++) {
@@ -728,13 +739,13 @@ export async function renewMembershipAtomic(
       const dueId = `${membershipId}_due_${i}`;
       const dueRef = doc(db, 'gyms', gymId, 'dues', dueId);
       
-      transaction.set(dueRef, {
+      transaction.set(dueRef, cleanUndefined({
         ...dRec,
         id: dueId,
         membershipId, // bind correct membership id
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-      });
+      }));
     }
 
     // Audit log
@@ -747,7 +758,7 @@ export async function renewMembershipAtomic(
       safeAfterSummary: `Renewed membership with plan ${membershipData.planNameSnapshot}`,
       timestamp: serverTimestamp(),
     };
-    transaction.set(auditRef, log);
+    transaction.set(auditRef, cleanUndefined(log));
   });
 }
 
